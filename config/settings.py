@@ -26,20 +26,20 @@ class FeishuConfig(BaseModel):
 
 
 class Settings(BaseModel):
-    # Providers
-    anthropic: ProviderConfig = ProviderConfig(model="claude-sonnet-4-6")
-    openai: ProviderConfig = ProviderConfig(model="gpt-4.1")
-    deepseek: ProviderConfig = ProviderConfig(
-        model="deepseek-chat", base_url="https://api.deepseek.com"
-    )
-    kimi: ProviderConfig = ProviderConfig(
-        model="kimi-k2.5", base_url="https://api.moonshot.cn/v1"
-    )
-    qwen: ProviderConfig = ProviderConfig(
-        model="qwen-plus",
-        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-    )
-    gemini: ProviderConfig = ProviderConfig(model="gemini-2.5-flash")
+    # Providers — defaults auto-resolved from presets.py at factory level.
+    # Users only need to set api_key (and optionally model) in config.yaml.
+    # Explicit base_url/model here are overrides; empty = use preset default.
+    anthropic: ProviderConfig = ProviderConfig()
+    openai: ProviderConfig = ProviderConfig()
+    deepseek: ProviderConfig = ProviderConfig()
+    kimi: ProviderConfig = ProviderConfig()
+    qwen: ProviderConfig = ProviderConfig()
+    zhipu: ProviderConfig = ProviderConfig()
+    minimax: ProviderConfig = ProviderConfig()
+    stepfun: ProviderConfig = ProviderConfig()
+    baichuan: ProviderConfig = ProviderConfig()
+    yi: ProviderConfig = ProviderConfig()
+    gemini: ProviderConfig = ProviderConfig()
 
     # Default provider for main conversation
     default_provider: str = "anthropic"

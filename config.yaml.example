@@ -1,0 +1,58 @@
+# agentic-feishu configuration
+# Copy to config.yaml and fill in your keys.
+# All values can be overridden via env vars: AGENTIC_ANTHROPIC_API_KEY, etc.
+
+# Default provider for conversations
+default_provider: deepseek  # anthropic | openai | deepseek | kimi | qwen | gemini
+
+# Provider configs
+anthropic:
+  api_key: ""
+  model: claude-sonnet-4-6
+
+openai:
+  api_key: ""
+  model: gpt-4.1
+
+deepseek:
+  api_key: ""
+  model: deepseek-chat
+  base_url: https://api.deepseek.com
+
+kimi:
+  api_key: ""
+  model: kimi-k2.5
+  base_url: https://api.moonshot.cn/v1
+
+qwen:
+  api_key: ""
+  model: qwen-plus
+  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+
+gemini:
+  api_key: ""
+  model: gemini-2.5-flash
+
+# Feishu bot credentials
+feishu:
+  app_id: ""
+  app_secret: ""
+
+# Agent loop
+max_turns: 50
+max_budget_usd: 1.0
+temperature: 0.7
+
+# Context management
+context_compress_threshold: 0.8
+compress_provider: ""  # empty = use default_provider
+
+# UI
+stream_output: false  # streaming card updates (throttled to 5 QPS)
+
+# Persona template name (from templates/personas/)
+persona: default
+
+# Paths
+data_dir: data
+workspace_dir: workspace

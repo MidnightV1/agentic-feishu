@@ -1,0 +1,12 @@
+config.yaml
+data/
+__pycache__/
+*.pyc
+.env
+.env.*
+*.log
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+workspace/

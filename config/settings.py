@@ -31,6 +31,7 @@ class Settings(BaseModel):
     # Explicit base_url/model here are overrides; empty = use preset default.
     anthropic: ProviderConfig = ProviderConfig()
     openai: ProviderConfig = ProviderConfig()
+    openrouter: ProviderConfig = ProviderConfig()
     deepseek: ProviderConfig = ProviderConfig()
     kimi: ProviderConfig = ProviderConfig()
     qwen: ProviderConfig = ProviderConfig()

@@ -86,6 +86,39 @@ PRESETS: dict[str, ProviderPreset] = {
         },
     ),
 
+    # ── Aggregator ─────────────────────────────────────────
+
+    "openrouter": ProviderPreset(
+        name="openrouter",
+        display_name="OpenRouter",
+        base_url="https://openrouter.ai/api/v1",
+        default_model="anthropic/claude-sonnet-4",
+        models={
+            # Anthropic
+            "anthropic/claude-opus-4": ModelInfo(context_window=200_000),
+            "anthropic/claude-sonnet-4": ModelInfo(context_window=200_000),
+            "anthropic/claude-haiku-4": ModelInfo(context_window=200_000),
+            # OpenAI
+            "openai/gpt-4.1": ModelInfo(context_window=1_000_000),
+            "openai/gpt-4.1-mini": ModelInfo(context_window=1_000_000),
+            "openai/o3": ModelInfo(context_window=200_000, reasoning=True),
+            "openai/o4-mini": ModelInfo(context_window=200_000, reasoning=True),
+            # Google
+            "google/gemini-2.5-pro": ModelInfo(context_window=1_000_000),
+            "google/gemini-2.5-flash": ModelInfo(context_window=1_000_000),
+            # DeepSeek
+            "deepseek/deepseek-chat-v3-0324": ModelInfo(context_window=128_000),
+            "deepseek/deepseek-r1": ModelInfo(context_window=128_000, reasoning=True),
+            # Meta
+            "meta-llama/llama-4-maverick": ModelInfo(context_window=1_000_000),
+            "meta-llama/llama-4-scout": ModelInfo(context_window=512_000),
+            # Qwen
+            "qwen/qwen3-235b-a22b": ModelInfo(context_window=128_000),
+            "qwen/qwq-32b": ModelInfo(context_window=128_000, reasoning=True),
+        },
+        note="model IDs use provider/model format; full catalog at openrouter.ai/models",
+    ),
+
     # ── China — Tier 1 (high activity, well-maintained) ──────
 
     "deepseek": ProviderPreset(

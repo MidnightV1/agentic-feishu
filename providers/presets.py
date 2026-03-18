@@ -20,11 +20,19 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class ModelInfo:
-    """Metadata for a single model."""
+    """Metadata for a single model.
+
+    Capability flags drive fallback logic:
+      - vision=False → image inputs converted to text description
+      - file_input=False → files processed via extraction, not native upload
+      - audio_input=False → audio transcribed to text before sending
+    """
     context_window: int = 128_000
     tool_support: bool = True
     vision: bool = False
-    reasoning: bool = False  # thinking/CoT model
+    file_input: bool = False   # native file/document upload
+    audio_input: bool = False  # native audio understanding
+    reasoning: bool = False    # thinking/CoT model
     note: str = ""
 
 
@@ -53,11 +61,11 @@ PRESETS: dict[str, ProviderPreset] = {
         default_model="gpt-4.1",
         sdk="openai",
         models={
-            "gpt-4.1": ModelInfo(context_window=1_000_000),
-            "gpt-4.1-mini": ModelInfo(context_window=1_000_000),
-            "gpt-4.1-nano": ModelInfo(context_window=1_000_000),
-            "o3": ModelInfo(context_window=200_000, reasoning=True),
-            "o4-mini": ModelInfo(context_window=200_000, reasoning=True),
+            "gpt-4.1": ModelInfo(context_window=1_000_000, vision=True, file_input=True),
+            "gpt-4.1-mini": ModelInfo(context_window=1_000_000, vision=True, file_input=True),
+            "gpt-4.1-nano": ModelInfo(context_window=1_000_000, vision=True),
+            "o3": ModelInfo(context_window=200_000, vision=True, reasoning=True),
+            "o4-mini": ModelInfo(context_window=200_000, vision=True, reasoning=True),
         },
     ),
 
@@ -68,9 +76,9 @@ PRESETS: dict[str, ProviderPreset] = {
         default_model="claude-sonnet-4-6",
         sdk="anthropic",
         models={
-            "claude-opus-4-6": ModelInfo(context_window=200_000),
-            "claude-sonnet-4-6": ModelInfo(context_window=200_000),
-            "claude-haiku-4-5-20251001": ModelInfo(context_window=200_000),
+            "claude-opus-4-6": ModelInfo(context_window=200_000, vision=True, file_input=True),
+            "claude-sonnet-4-6": ModelInfo(context_window=200_000, vision=True, file_input=True),
+            "claude-haiku-4-5-20251001": ModelInfo(context_window=200_000, vision=True),
         },
     ),
 
@@ -81,8 +89,8 @@ PRESETS: dict[str, ProviderPreset] = {
         default_model="gemini-2.5-flash",
         sdk="gemini",
         models={
-            "gemini-2.5-pro": ModelInfo(context_window=1_000_000),
-            "gemini-2.5-flash": ModelInfo(context_window=1_000_000),
+            "gemini-2.5-pro": ModelInfo(context_window=1_000_000, vision=True, file_input=True, audio_input=True),
+            "gemini-2.5-flash": ModelInfo(context_window=1_000_000, vision=True, file_input=True, audio_input=True),
         },
     ),
 
@@ -276,3 +284,33 @@ def get_context_window(provider: str, model: str) -> int:
         return 128_000  # safe default
     info = preset.models.get(model)
     return info.context_window if info else 128_000
+
+
+def get_model_info(provider: str, model: str) -> ModelInfo:
+    """Return full model info. Falls back to conservative defaults (all capabilities off)."""
+    preset = PRESETS.get(provider)
+    if preset:
+        info = preset.models.get(model)
+        if info:
+            return info
+    return ModelInfo()  # conservative: no vision, no file, no audio
+
+
+def get_capabilities(provider: str, model: str) -> dict[str, bool]:
+    """Return capability flags as a dict for runtime feature gating.
+
+    Usage:
+        caps = get_capabilities("openai", "gpt-4.1")
+        if caps["vision"]:
+            # send image natively
+        else:
+            # extract text description first
+    """
+    info = get_model_info(provider, model)
+    return {
+        "vision": info.vision,
+        "file_input": info.file_input,
+        "audio_input": info.audio_input,
+        "tool_support": info.tool_support,
+        "reasoning": info.reasoning,
+    }

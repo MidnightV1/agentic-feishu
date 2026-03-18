@@ -171,28 +171,47 @@ class FeishuDispatcher:
         import lark_oapi as lark
         from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
 
-        body_builder = (
-            CreateMessageRequestBody.builder()
-            .receive_id(chat_id)
-            .msg_type("interactive")
-            .content(json.dumps(card))
-        )
-        if reply_message_id:
-            # Note: reply is set at request level, not body level
-            pass
-
-        req = (
-            CreateMessageRequest.builder()
-            .receive_id_type("chat_id")
-            .request_body(body_builder.build())
-            .build()
-        )
+        content_json = json.dumps(card)
 
         try:
-            resp = await self._client.im.v1.message.acreate(req)
+            if reply_message_id:
+                # Use Reply API — separate endpoint: POST /messages/{id}/reply
+                from lark_oapi.api.im.v1 import ReplyMessageRequest, ReplyMessageRequestBody
+                req = (
+                    ReplyMessageRequest.builder()
+                    .message_id(reply_message_id)
+                    .request_body(
+                        ReplyMessageRequestBody.builder()
+                        .msg_type("interactive")
+                        .content(content_json)
+                        .build()
+                    )
+                    .build()
+                )
+                resp = await self._client.im.v1.message.areply(req)
+            else:
+                body = (
+                    CreateMessageRequestBody.builder()
+                    .receive_id(chat_id)
+                    .msg_type("interactive")
+                    .content(content_json)
+                    .build()
+                )
+                req = (
+                    CreateMessageRequest.builder()
+                    .receive_id_type("chat_id")
+                    .request_body(body)
+                    .build()
+                )
+                resp = await self._client.im.v1.message.acreate(req)
+
             if resp.success():
                 return resp.data.message_id
             log.warning("Send card failed: code=%s msg=%s", resp.code, resp.msg)
+            # 230011 = message withdrawn; fall back to non-reply send
+            if resp.code == 230011 and reply_message_id:
+                log.info("Reply target withdrawn, falling back to non-reply send")
+                return await self._send_card_raw(chat_id, card)
             return None
         except Exception as e:
             log.exception("Send card error: %s", e)

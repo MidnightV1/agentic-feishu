@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -28,6 +29,40 @@ log = logging.getLogger("agentic.feishu.adapter")
 
 DEBOUNCE_SECONDS = 0.5
 DEDUP_TTL = 3600  # 1h
+
+# ── Easter egg message pools ──────────────────────────────────
+
+_THINKING_POOL = [
+    "腌制中，让想法入味…", "慢炖，用文火…", "酝酿中…", "思考中…",
+    "神游中…", "脑子在转…", "在线发呆（其实在想）…", "CPU 过热中…",
+    "正在顿悟…", "酝酿思路…", "沉淀中…", "进入意识流…",
+    "脑细胞正在开会…", "正在加载人生经验…", "让我消化一下…",
+]
+
+_LONG_THINKING = [
+    "慢工出细活，不要慌…", "卧槽，大活儿，还得想想…",
+    "差点顿悟了，让我冷静下…", "GPU已经起飞…",
+    "喝口水，别急，你也喝点，干杯", "Moss，这道题怎么解呀...",
+    "正在求助祖师爷...", "神经网络迸发出了灵感...",
+    "正在唤醒专家网络...", "正在烧香...", "正在掐指一算...",
+    "嘿嘿嘿...", "什么情况...", "？？？", "hummmm...",
+    "哦...", "嗯？", "尝试甩锅给CPU...", "正在蒸馏deepseek...",
+    "正在和自己对线...", "Warning: 思路溢出...", "脑子：已读不回",
+    "正在请求上级支援...", "快了快了（经典谎言）",
+    "等等，好像悟了...又没有", "别催，灵感不接受加班",
+    "正在向赛博佛祖祈祷...", "道生一，一生二，二生 bug...",
+]
+
+
+def _idle_label(elapsed: float) -> str:
+    """Pick a random easter egg based on elapsed time."""
+    pool = _LONG_THINKING if elapsed >= 60 else _THINKING_POOL
+    label = random.choice(pool)
+    if elapsed >= 30:
+        m, s = divmod(int(elapsed), 60)
+        ts = f"{m}m{s:02d}s" if m else f"{s}s"
+        return f"💭 {label} ({ts})"
+    return f"💭 {label}"
 
 
 @dataclass
@@ -62,6 +97,7 @@ class FeishuAdapter:
         run_config: RunConfig,
         system_prompt: str = "",
         domain: str = "https://open.feishu.cn",
+        usage_tracker: Any = None,  # infra.usage.UsageTracker (optional)
         on_explore: Any = None,    # async callback(hints: str) for explore processing
         on_task_plan: Any = None,  # async callback(plan_json: str, chat_id: str) for orchestration
     ):
@@ -70,6 +106,7 @@ class FeishuAdapter:
         self.domain = domain
         self._loop = agent_loop
         self._dispatcher = dispatcher
+        self._usage = usage_tracker
         self._sessions = session_store
         self._run_config = run_config
         self._system_prompt = system_prompt
@@ -84,7 +121,13 @@ class FeishuAdapter:
     # ── Lifecycle ──────────────────────────────────────────────────
 
     async def start(self) -> None:
-        """Start WebSocket connection to Feishu."""
+        """Start WebSocket connection to Feishu.
+
+        Applies three critical monkey-patches for Lark SDK WebSocket stability:
+        1. ping_interval cap — server pushes 120s, we cap to 30s
+        2. websockets built-in ping disable — conflicts with SDK ping
+        3. event loop isolation — module-level loop variable causes cross-instance issues
+        """
         import lark_oapi as lark
         from lark_oapi.ws import Client as WsClient
 
@@ -103,19 +146,91 @@ class FeishuAdapter:
         )
 
         self._running = True
-        # WsClient.start() is blocking — run in a thread
-        asyncio.get_event_loop().run_in_executor(None, self._ws_client.start)
-        log.info("Feishu WebSocket adapter started")
+        self._loop_ref = asyncio.get_running_loop()
+
+        # Patch 1: cap ping_interval (server sends 120s, too long → idle disconnect)
+        _client = self._ws_client
+        _orig_configure = _client._configure
+
+        def _patched_configure(conf):
+            _orig_configure(conf)
+            if _client._ping_interval > 30:
+                _client._ping_interval = 30
+
+        _client._configure = _patched_configure
+
+        def _start_ws():
+            # Patch 3: event loop isolation (SDK module-level loop variable)
+            import lark_oapi.ws.client as ws_mod
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            ws_mod.loop = loop
+
+            # Patch 2: disable websockets built-in ping (conflicts with SDK ping)
+            import websockets
+            _orig_connect = websockets.connect
+
+            def _patched_ws_connect(uri, **kwargs):
+                kwargs.setdefault("ping_interval", None)
+                kwargs.setdefault("ping_timeout", None)
+                return _orig_connect(uri, **kwargs)
+
+            websockets.connect = _patched_ws_connect
+            _client.start()
+            websockets.connect = _orig_connect  # restore
+
+        self._loop_ref.run_in_executor(None, _start_ws)
+        log.info("Feishu WebSocket adapter started (patches: ping_cap, ws_ping_off, loop_isolation)")
+
+        # Start health monitor
+        self._health_task = asyncio.ensure_future(self._ws_health_monitor())
 
     async def stop(self) -> None:
         """Stop the adapter."""
         self._running = False
+        # Cancel health monitor
+        if hasattr(self, "_health_task") and self._health_task:
+            self._health_task.cancel()
         # Cancel pending debounce timers
         for batch in self._pending.values():
             if batch.timer:
                 batch.timer.cancel()
         self._pending.clear()
         log.info("Feishu adapter stopped")
+
+    # ── WS Health Monitor ─────────────────────────────────────────
+
+    async def _ws_health_monitor(self) -> None:
+        """Check WebSocket health every 30s. Exit process if dead for 90s.
+
+        Lark SDK bug: disconnection leaves _select() spinning forever
+        without reconnecting. Force exit to let process manager restart.
+        """
+        await asyncio.sleep(30)  # initial grace period
+        consecutive_failures = 0
+        while self._running:
+            await asyncio.sleep(30)
+            try:
+                conn = getattr(self._ws_client, "_conn", None)
+                if conn is None:
+                    consecutive_failures += 1
+                elif hasattr(conn, "closed") and conn.closed:
+                    consecutive_failures += 1
+                elif hasattr(conn, "open") and not conn.open:
+                    consecutive_failures += 1
+                else:
+                    consecutive_failures = 0
+                    continue
+
+                if consecutive_failures >= 3:
+                    log.error(
+                        "WebSocket dead for %ds, exiting for process restart",
+                        consecutive_failures * 30,
+                    )
+                    import sys
+                    sys.exit(1)
+            except Exception:
+                pass
 
     # ── Event handling ────────────────────────────────────────────
 
@@ -215,8 +330,10 @@ class FeishuAdapter:
         sender_name: str,
         reply_to: str,
     ) -> None:
-        """Wrap input → run agent loop → parse output → route responses."""
+        """Wrap input → thinking card → run agent loop → parse output → route responses."""
         session_key = f"feishu:{chat_id}:{sender_id}"
+        thinking_id: str | None = None
+        pulse_task: asyncio.Task | None = None
 
         try:
             # Load session history
@@ -235,6 +352,11 @@ class FeishuAdapter:
                 )
                 await self._sessions.save(session)
 
+            # ── Thinking card: immediate feedback ──
+            thinking_id = await self._dispatcher.send_card(
+                chat_id, "💭 脑子在转…", reply_to
+            )
+
             # ── Input wrapping: <user-input> tag protocol ──
             wrapped_prompt = wrap_user_input(
                 text,
@@ -243,36 +365,59 @@ class FeishuAdapter:
                 chat_type=chat_type,
             )
 
-            # TODO: inject_notifications() when heartbeat/notification system is wired
-            # wrapped_prompt = inject_notifications(wrapped_prompt, pending_notifications)
-
             # Save raw user message (unwrapped — tags are transport-layer, not storage)
             await self._sessions.add_message(session_key, "user", text)
 
-            # Streaming text accumulator for card updates
+            # ── Streaming + pulse state ──
             stream_buf: list[str] = []
-            card_id: str | None = None
-            last_update = 0.0
+            streaming_started = False
+            last_activity = [time.monotonic()]
+            start_time = time.monotonic()
+
+            async def _pulse():
+                """Background heartbeat: rotate easter eggs when idle."""
+                await asyncio.sleep(8)
+                while True:
+                    elapsed = time.monotonic() - start_time
+                    since_activity = time.monotonic() - last_activity[0]
+                    # Only update thinking card if we haven't started streaming yet
+                    if since_activity >= 6 and thinking_id and not streaming_started:
+                        try:
+                            await self._dispatcher.update_card(
+                                thinking_id, _idle_label(elapsed)
+                            )
+                        except Exception:
+                            pass
+                    await asyncio.sleep(8)
+
+            pulse_task = asyncio.create_task(_pulse())
 
             async def on_text(delta: str) -> None:
-                nonlocal card_id, last_update
+                nonlocal streaming_started
+                last_activity[0] = time.monotonic()
                 stream_buf.append(delta)
                 now = time.time()
-                # Throttle card updates to ~5 QPS
-                if now - last_update > 0.2:
-                    last_update = now
-                    full_text = "".join(stream_buf)
-                    # During streaming, show raw text (tags will be parsed at the end)
-                    # Strip obvious tags for preview to avoid confusing the user
-                    preview = _strip_tags_for_preview(full_text)
-                    if card_id:
-                        await self._dispatcher.update_card(card_id, preview + " ▍")
-                    else:
-                        card_id = await self._dispatcher.send_card(
-                            chat_id, preview + " ▍", reply_to
-                        )
 
-            callbacks = Callbacks(on_text=on_text) if self._run_config.stream else None
+                if not streaming_started:
+                    streaming_started = True
+
+                # Throttle card updates to ~5 QPS
+                full_text = "".join(stream_buf)
+                preview = _strip_tags_for_preview(full_text)
+                if thinking_id and len(preview) > 5:
+                    await self._dispatcher.update_card(thinking_id, preview + " ▍")
+
+            async def on_tool_start(name: str, **_kw) -> None:
+                last_activity[0] = time.monotonic()
+                if thinking_id and not streaming_started:
+                    await self._dispatcher.update_card(
+                        thinking_id, f"🔧 {name}…"
+                    )
+
+            callbacks = Callbacks(
+                on_text=on_text,
+                on_tool_start=on_tool_start,
+            ) if self._run_config.stream else None
 
             # Run agent loop (with wrapped prompt)
             result = await self._loop.run(
@@ -283,14 +428,17 @@ class FeishuAdapter:
                 callbacks=callbacks,
             )
 
+            # Stop pulse
+            if pulse_task:
+                pulse_task.cancel()
+                pulse_task = None
+
             # ── Output parsing: tag protocol ──
             raw_response = result.text or ""
             parsed = parse_output(raw_response)
 
             if parsed.tags_present:
                 log.info("Tags found in response: %s", parsed.tags_present)
-            else:
-                log.info("No tags in response (session=%s), sending raw output", session_key)
 
             # ── Route: task_plan → orchestrator ──
             if parsed.task_plan_json and self._on_task_plan:
@@ -308,18 +456,13 @@ class FeishuAdapter:
             reply_text = parsed.reply_text
 
             if reply_text:
-                if card_id and self._run_config.stream:
-                    await self._dispatcher.update_card(card_id, reply_text)
+                if thinking_id:
+                    # Replace thinking card with final reply
+                    await self._dispatcher.update_card(thinking_id, reply_text)
                 else:
-                    if card_id:
-                        # Streaming was on but we need to replace with parsed content
-                        await self._dispatcher.update_card(card_id, reply_text)
-                    else:
-                        await self._dispatcher.send_card(chat_id, reply_text, reply_to)
-            elif card_id:
-                # No reply content — delete the streaming card
-                # (pure notification response or empty)
-                await self._dispatcher.update_card(card_id, "(处理完成)")
+                    await self._dispatcher.send_card(chat_id, reply_text, reply_to)
+            elif thinking_id:
+                await self._dispatcher.update_card(thinking_id, "(处理完成)")
 
             # Save assistant message (parsed reply, not raw — matches what user sees)
             if reply_text:
@@ -330,6 +473,18 @@ class FeishuAdapter:
             session.total_cost_usd += result.cost_usd
             await self._sessions.save(session)
 
+            # Record usage
+            if self._usage:
+                self._usage.record(
+                    session_key=session_key,
+                    model=self._run_config.model,
+                    provider=self._run_config.provider,
+                    input_tokens=result.usage.input_tokens,
+                    output_tokens=result.usage.output_tokens,
+                    cached_tokens=result.usage.cached_tokens,
+                    cost_usd=result.cost_usd,
+                )
+
             log.info(
                 "Processed message: turns=%d cost=$%.4f model=%s",
                 result.turn_count,
@@ -339,11 +494,20 @@ class FeishuAdapter:
 
         except Exception:
             log.exception("Error processing message from %s in %s", sender_id, chat_id)
-            await self._dispatcher.send_card(
-                chat_id,
-                "{{card:header=处理出错,color=red}}\n抱歉，处理消息时发生错误，请稍后重试。",
-                reply_to,
-            )
+            if thinking_id:
+                await self._dispatcher.update_card(
+                    thinking_id,
+                    "{{card:header=处理出错,color=red}}\n抱歉，处理消息时发生错误，请稍后重试。",
+                )
+            else:
+                await self._dispatcher.send_card(
+                    chat_id,
+                    "{{card:header=处理出错,color=red}}\n抱歉，处理消息时发生错误，请稍后重试。",
+                    reply_to,
+                )
+        finally:
+            if pulse_task and not pulse_task.done():
+                pulse_task.cancel()
 
     # ── Housekeeping ──────────────────────────────────────────────
 

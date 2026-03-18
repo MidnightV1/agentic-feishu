@@ -12,13 +12,14 @@ from pathlib import Path
 
 from config.settings import load_settings
 from core.agent_loop import AgentLoop
-from core.context_manager import ContextConfig, ContextManager
+from core.context_manager import ContextComponent, ContextConfig, ContextManager
 from core.tool_registry import ToolRegistry
 from core.types import RunConfig
 from infra.session import SessionStore
 from platforms.feishu.adapter import FeishuAdapter
 from platforms.feishu.api import FeishuAPI
 from platforms.feishu.dispatcher import FeishuDispatcher
+from platforms.feishu.prompts import FEISHU_SYSTEM_PROMPT
 from providers.factory import create_provider
 from tools.builtin import feishu_tools, general_tools
 
@@ -93,9 +94,13 @@ async def main() -> None:
         stream=settings.stream_output,
     )
 
-    # ── System prompt ─────────────────────────────────────────────
+    # ── System prompt (assembled from components) ────────────────
     persona_text = _load_persona(settings.persona)
-    system_prompt = persona_text
+    components = [
+        ContextComponent(type="platform_rules", content=FEISHU_SYSTEM_PROMPT, priority=90),
+        ContextComponent(type="persona", content=persona_text, priority=50),
+    ]
+    system_prompt = await context_mgr.build_system_prompt(components)
 
     # ── Session store ─────────────────────────────────────────────
     session_store = SessionStore(

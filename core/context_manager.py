@@ -195,6 +195,7 @@ def _section_header(component_type: str) -> str:
     """Map component type to a markdown header."""
     headers = {
         "base_instructions": "# Instructions",
+        "platform_rules": "# Platform",
         "skill_descriptions": "# Available Skills",
         "environment": "# Environment",
         "persona": "# Persona",

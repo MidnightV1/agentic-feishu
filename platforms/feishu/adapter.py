@@ -3,6 +3,10 @@
 
 Connects to Feishu via Lark SDK WebSocket, receives messages,
 routes them through the AgentLoop, and sends responses via Dispatcher.
+
+Tag protocol integration:
+  Input:  user text → wrap_user_input() → <user-input> tagged prompt
+  Output: LLM response → parse_output() → reply / explore / task_plan
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ from core.agent_loop import AgentLoop
 from core.types import Callbacks, Message, RunConfig
 from infra.session import SessionStore, SessionRecord
 from platforms.feishu.dispatcher import FeishuDispatcher
+from platforms.feishu.tags import wrap_user_input, inject_notifications, parse_output
 
 log = logging.getLogger("agentic.feishu.adapter")
 
@@ -32,6 +37,7 @@ class PendingBatch:
     chat_id: str = ""
     chat_type: str = ""
     sender_id: str = ""
+    sender_name: str = ""
     first_message_id: str = ""
     timer: asyncio.Task | None = None
 
@@ -56,6 +62,8 @@ class FeishuAdapter:
         run_config: RunConfig,
         system_prompt: str = "",
         domain: str = "https://open.feishu.cn",
+        on_explore: Any = None,    # async callback(hints: str) for explore processing
+        on_task_plan: Any = None,  # async callback(plan_json: str, chat_id: str) for orchestration
     ):
         self.app_id = app_id
         self.app_secret = app_secret
@@ -65,6 +73,8 @@ class FeishuAdapter:
         self._sessions = session_store
         self._run_config = run_config
         self._system_prompt = system_prompt
+        self._on_explore = on_explore
+        self._on_task_plan = on_task_plan
 
         self._pending: dict[str, PendingBatch] = {}
         self._seen_ids: dict[str, float] = {}  # message_id → timestamp
@@ -185,7 +195,12 @@ class FeishuAdapter:
         combined_text = "\n".join(batch.parts)
         asyncio.create_task(
             self._process_message(
-                combined_text, batch.chat_id, batch.sender_id, batch.first_message_id
+                combined_text,
+                batch.chat_id,
+                batch.chat_type,
+                batch.sender_id,
+                batch.sender_name,
+                batch.first_message_id,
             )
         )
 
@@ -195,10 +210,12 @@ class FeishuAdapter:
         self,
         text: str,
         chat_id: str,
+        chat_type: str,
         sender_id: str,
+        sender_name: str,
         reply_to: str,
     ) -> None:
-        """Run the agent loop and send the response."""
+        """Wrap input → run agent loop → parse output → route responses."""
         session_key = f"feishu:{chat_id}:{sender_id}"
 
         try:
@@ -218,7 +235,18 @@ class FeishuAdapter:
                 )
                 await self._sessions.save(session)
 
-            # Save user message
+            # ── Input wrapping: <user-input> tag protocol ──
+            wrapped_prompt = wrap_user_input(
+                text,
+                sender_name=sender_name,
+                chat_id=chat_id,
+                chat_type=chat_type,
+            )
+
+            # TODO: inject_notifications() when heartbeat/notification system is wired
+            # wrapped_prompt = inject_notifications(wrapped_prompt, pending_notifications)
+
+            # Save raw user message (unwrapped — tags are transport-layer, not storage)
             await self._sessions.add_message(session_key, "user", text)
 
             # Streaming text accumulator for card updates
@@ -234,35 +262,68 @@ class FeishuAdapter:
                 if now - last_update > 0.2:
                     last_update = now
                     full_text = "".join(stream_buf)
+                    # During streaming, show raw text (tags will be parsed at the end)
+                    # Strip obvious tags for preview to avoid confusing the user
+                    preview = _strip_tags_for_preview(full_text)
                     if card_id:
-                        await self._dispatcher.update_card(card_id, full_text + " ▍")
+                        await self._dispatcher.update_card(card_id, preview + " ▍")
                     else:
                         card_id = await self._dispatcher.send_card(
-                            chat_id, full_text + " ▍", reply_to
+                            chat_id, preview + " ▍", reply_to
                         )
 
             callbacks = Callbacks(on_text=on_text) if self._run_config.stream else None
 
-            # Run agent loop
+            # Run agent loop (with wrapped prompt)
             result = await self._loop.run(
-                prompt=text,
+                prompt=wrapped_prompt,
                 config=self._run_config,
                 system_prompt=self._system_prompt,
                 messages=history_msgs,
                 callbacks=callbacks,
             )
 
-            # Send final response
-            response_text = result.text or "(no response)"
+            # ── Output parsing: tag protocol ──
+            raw_response = result.text or ""
+            parsed = parse_output(raw_response)
 
-            if card_id and self._run_config.stream:
-                # Update card with final text (remove cursor)
-                await self._dispatcher.update_card(card_id, response_text)
+            if parsed.tags_present:
+                log.info("Tags found in response: %s", parsed.tags_present)
             else:
-                await self._dispatcher.send_card(chat_id, response_text, reply_to)
+                log.info("No tags in response (session=%s), sending raw output", session_key)
 
-            # Save assistant message
-            await self._sessions.add_message(session_key, "assistant", response_text)
+            # ── Route: task_plan → orchestrator ──
+            if parsed.task_plan_json and self._on_task_plan:
+                asyncio.create_task(
+                    self._on_task_plan(parsed.task_plan_json, chat_id)
+                )
+
+            # ── Route: explore hints → async processing ──
+            if parsed.explore_hints and self._on_explore:
+                asyncio.create_task(
+                    self._on_explore(parsed.explore_hints)
+                )
+
+            # ── Route: reply → user ──
+            reply_text = parsed.reply_text
+
+            if reply_text:
+                if card_id and self._run_config.stream:
+                    await self._dispatcher.update_card(card_id, reply_text)
+                else:
+                    if card_id:
+                        # Streaming was on but we need to replace with parsed content
+                        await self._dispatcher.update_card(card_id, reply_text)
+                    else:
+                        await self._dispatcher.send_card(chat_id, reply_text, reply_to)
+            elif card_id:
+                # No reply content — delete the streaming card
+                # (pure notification response or empty)
+                await self._dispatcher.update_card(card_id, "(处理完成)")
+
+            # Save assistant message (parsed reply, not raw — matches what user sees)
+            if reply_text:
+                await self._sessions.add_message(session_key, "assistant", reply_text)
 
             # Update session stats
             session.message_count += 2  # user + assistant
@@ -291,3 +352,20 @@ class FeishuAdapter:
         expired = [k for k, t in self._seen_ids.items() if now - t > DEDUP_TTL]
         for k in expired:
             del self._seen_ids[k]
+
+
+# ── Helpers ────────────────────────────────────────────────────
+
+def _strip_tags_for_preview(text: str) -> str:
+    """Remove XML tags from streaming preview to avoid showing raw protocol to user.
+
+    During streaming we show a rough preview; final parsing happens after completion.
+    """
+    import re
+    # Remove <next-explore>...</next-explore> blocks
+    text = re.sub(r"<next-explore>.*?</next-explore>", "", text, flags=re.DOTALL)
+    # Remove <task_plan>...</task_plan> blocks
+    text = re.sub(r"<task_plan>.*?</task_plan>", "", text, flags=re.DOTALL)
+    # Remove the wrapper tags but keep content
+    text = re.sub(r"</?reply-to-user>", "", text)
+    return text.strip()

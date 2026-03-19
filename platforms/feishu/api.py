@@ -118,60 +118,192 @@ class FeishuAPI:
             return f"Error: {resp.code}: {resp.msg}"
         return resp.data.content
 
-    async def append_document(self, document_id: str, content: str) -> dict:
-        """Append markdown content to a document, converting to native blocks."""
-        from platforms.feishu.blocks import text_to_blocks
+    async def _get_tenant_token(self) -> str:
+        """Get cached tenant_access_token for raw HTTP calls."""
+        import time as _time
+        if self._token_cache["expires"] > _time.time():
+            return self._token_cache["token"]
 
-        client = self._ensure_client()
-        from lark_oapi.api.docx.v1 import (
-            CreateDocumentBlockChildrenRequest,
-            CreateDocumentBlockChildrenRequestBody,
-        )
+        async with httpx.AsyncClient() as http:
+            resp = await http.post(
+                f"{self.domain}/open-apis/auth/v3/tenant_access_token/internal",
+                json={"app_id": self.app_id, "app_secret": self.app_secret},
+            )
+            data = resp.json()
+            token = data.get("tenant_access_token", "")
+            self._token_cache = {
+                "token": token,
+                "expires": _time.time() + data.get("expire", 7200) - 60,
+            }
+            return token
+
+    async def _raw_request(self, method: str, path: str,
+                           body: dict | None = None,
+                           params: dict | None = None) -> dict:
+        """Make raw HTTP request to Feishu API with tenant_access_token."""
+        token = await self._get_tenant_token()
+        url = f"{self.domain}{path}"
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        async with httpx.AsyncClient() as http:
+            resp = await http.request(method, url, json=body, params=params, headers=headers)
+            return resp.json()
+
+    async def append_document(self, document_id: str, content: str) -> dict:
+        """Append markdown content to a document, with native table support."""
+        from platforms.feishu.blocks import text_to_blocks, split_table_rows, TABLE_MAX_COLS
 
         all_blocks = text_to_blocks(content)
         if not all_blocks:
             return {"ok": True, "blocks_added": 0}
 
-        # Filter out table markers (degrade to pipe-delimited text)
-        blocks = []
-        for b in all_blocks:
-            if "_table" in b:
-                # Degrade: table → plain text rows
-                rows = b["_table"]
-                for row in rows:
-                    line = "| " + " | ".join(row) + " |"
-                    blocks.append({
-                        "block_type": 2,
-                        "text": {"elements": [{"text_run": {"content": line}}]},
-                    })
-            else:
-                blocks.append(b)
-
-        # Flush in batches (Feishu API limit ~50 blocks per request)
-        BATCH_SIZE = 50
         total = 0
-        for i in range(0, len(blocks), BATCH_SIZE):
-            chunk = blocks[i:i + BATCH_SIZE]
-            req = (
-                CreateDocumentBlockChildrenRequest.builder()
-                .document_id(document_id)
-                .block_id(document_id)  # root block
-                .request_body(
-                    CreateDocumentBlockChildrenRequestBody.builder()
-                    .children(chunk)
-                    .build()
-                )
-                .build()
-            )
-            resp = await client.docx.v1.document_block_children.acreate(req)
-            if not resp.success():
-                log.error("append_document batch failed: %s %s", resp.code, resp.msg)
-                if total == 0:
-                    return {"error": f"{resp.code}: {resp.msg}"}
-                break
-            total += len(chunk)
+        regular_batch: list[dict] = []
+        BATCH_SIZE = 50
 
+        async def _flush_regular():
+            nonlocal total
+            if not regular_batch:
+                return
+            for i in range(0, len(regular_batch), BATCH_SIZE):
+                chunk = regular_batch[i:i + BATCH_SIZE]
+                resp = await self._raw_request(
+                    "POST",
+                    f"/open-apis/docx/v1/documents/{document_id}/blocks/{document_id}/children",
+                    body={"children": chunk, "index": -1},
+                    params={"document_revision_id": "-1"},
+                )
+                if resp.get("code") == 0:
+                    total += len(chunk)
+                else:
+                    log.error("Flush %d blocks failed: %s | doc=%s",
+                              len(chunk), resp.get("msg"), document_id)
+            regular_batch.clear()
+
+        for block in all_blocks:
+            if "_table" in block:
+                await _flush_regular()
+                rows = block["_table"]
+
+                # Truncate columns exceeding API limit
+                col_count = max(len(r) for r in rows) if rows else 0
+                if col_count > TABLE_MAX_COLS:
+                    rows = [r[:TABLE_MAX_COLS] for r in rows]
+
+                chunks = split_table_rows(rows)
+                for chunk in chunks:
+                    table_bid = await self._create_table_in_doc(document_id, chunk)
+                    if table_bid:
+                        total += 1
+                    else:
+                        # Degrade: table failed → write as plain-text pipe rows
+                        log.warning("Table degraded to text: %d rows | doc=%s",
+                                    len(chunk), document_id)
+                        for row in chunk:
+                            line = "| " + " | ".join(row) + " |"
+                            regular_batch.append({
+                                "block_type": 2,
+                                "text": {"elements": [{"text_run": {"content": line}}]},
+                            })
+            else:
+                regular_batch.append(block)
+
+        await _flush_regular()
         return {"ok": True, "blocks_added": total}
+
+    async def _create_table_in_doc(self, doc_id: str, rows: list[list[str]]) -> str | None:
+        """Create a native table in a Feishu document (two-step: create → fill)."""
+        from platforms.feishu.blocks import _parse_inline
+
+        row_count = len(rows)
+        col_count = len(rows[0]) if rows else 0
+        if row_count == 0 or col_count == 0:
+            return None
+
+        # Step 1: Create empty table
+        resp = await self._raw_request(
+            "POST",
+            f"/open-apis/docx/v1/documents/{doc_id}/blocks/{doc_id}/children",
+            body={
+                "children": [{
+                    "block_type": 31,
+                    "table": {
+                        "property": {
+                            "row_size": row_count,
+                            "column_size": col_count,
+                            "header_row": True,
+                        }
+                    }
+                }],
+                "index": -1,
+            },
+            params={"document_revision_id": "-1"},
+        )
+        if resp.get("code") != 0:
+            log.error("Create table failed: %s | rows=%d cols=%d doc=%s",
+                      resp.get("msg"), row_count, col_count, doc_id)
+            return None
+
+        # Extract cell block_ids
+        table_block = resp["data"]["children"][0]
+        cell_ids = table_block.get("table", {}).get("cells", [])
+        table_bid = table_block.get("block_id")
+        if len(cell_ids) != row_count * col_count:
+            log.warning("Table cell count mismatch: expected %d, got %d",
+                        row_count * col_count, len(cell_ids))
+            return table_bid
+
+        # Step 2: Fill cells
+        idx = 0
+        for ri, row in enumerate(rows):
+            for ci, cell_text in enumerate(row):
+                cell_id = cell_ids[idx]
+                idx += 1
+                try:
+                    # Get the auto-generated text block in the cell
+                    child_resp = await self._raw_request(
+                        "GET",
+                        f"/open-apis/docx/v1/documents/{doc_id}/blocks/{cell_id}/children",
+                        params={"document_revision_id": "-1"},
+                    )
+                    items = child_resp.get("data", {}).get("items", [])
+                    if items:
+                        text_block_id = items[0]["block_id"]
+                    else:
+                        # Create text block in cell
+                        cr = await self._raw_request(
+                            "POST",
+                            f"/open-apis/docx/v1/documents/{doc_id}/blocks/{cell_id}/children",
+                            body={"children": [{"block_type": 2, "text": {"elements": [
+                                {"text_run": {"content": ""}}
+                            ]}}]},
+                            params={"document_revision_id": "-1"},
+                        )
+                        created = cr.get("data", {}).get("children", [])
+                        if not created:
+                            continue
+                        text_block_id = created[0]["block_id"]
+
+                    # Header row = bold, others = inline-parsed
+                    if ri == 0:
+                        elements = [{"text_run": {
+                            "content": cell_text,
+                            "text_element_style": {"bold": True},
+                        }}]
+                    else:
+                        elements = _parse_inline(cell_text) if cell_text else [
+                            {"text_run": {"content": ""}}
+                        ]
+
+                    await self._raw_request(
+                        "PATCH",
+                        f"/open-apis/docx/v1/documents/{doc_id}/blocks/{text_block_id}",
+                        body={"update_text_elements": {"elements": elements}},
+                        params={"document_revision_id": "-1"},
+                    )
+                except Exception as e:
+                    log.warning("Fill cell [%d,%d] failed: %s", ri, ci, e)
+
+        return table_bid
 
     async def search_documents(self, query: str, count: int = 10) -> list:
         client = self._ensure_client()

@@ -252,7 +252,8 @@ class FeishuDispatcher:
     _RETRY_BACKOFF = (1, 2)  # seconds
 
     async def _send_card_raw(
-        self, chat_id: str, card: dict, reply_message_id: str = ""
+        self, receive_id: str, card: dict, reply_message_id: str = "",
+        receive_id_type: str = "chat_id",
     ) -> str | None:
         import lark_oapi as lark
         from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
@@ -279,14 +280,14 @@ class FeishuDispatcher:
                 else:
                     body = (
                         CreateMessageRequestBody.builder()
-                        .receive_id(chat_id)
+                        .receive_id(receive_id)
                         .msg_type("interactive")
                         .content(content_json)
                         .build()
                     )
                     req = (
                         CreateMessageRequest.builder()
-                        .receive_id_type("chat_id")
+                        .receive_id_type(receive_id_type)
                         .request_body(body)
                         .build()
                     )
@@ -299,7 +300,7 @@ class FeishuDispatcher:
                 # 230011 = message withdrawn; fall back to non-reply send
                 if resp.code == 230011 and reply_message_id:
                     log.info("Reply target withdrawn, falling back to non-reply send")
-                    return await self._send_card_raw(chat_id, card)
+                    return await self._send_card_raw(receive_id, card, receive_id_type=receive_id_type)
                 return None
 
             except Exception as e:
@@ -347,3 +348,42 @@ class FeishuDispatcher:
         except Exception:
             log.exception("Send text error")
             return None
+
+    async def send_to_user(self, open_id: str, text: str) -> str | None:
+        """Send a card message directly to a user via open_id."""
+        if not self._client:
+            log.error("Dispatcher not started")
+            return None
+
+        text = _scan_secrets(text)
+        text, header, color = _parse_card_directive(text)
+        chunks = _chunk_markdown(text)
+
+        first_msg_id = None
+        for i, chunk in enumerate(chunks):
+            card = _build_card(chunk, header if i == 0 else None, color)
+            msg_id = await self._send_card_raw(
+                open_id, card, receive_id_type="open_id",
+            )
+            if i == 0:
+                first_msg_id = msg_id
+
+        return first_msg_id
+
+    async def delete_message(self, message_id: str) -> bool:
+        """Delete a message by ID."""
+        if not self._client:
+            return False
+
+        from lark_oapi.api.im.v1 import DeleteMessageRequest
+
+        req = DeleteMessageRequest.builder().message_id(message_id).build()
+        try:
+            resp = await self._client.im.v1.message.adelete(req)
+            if resp.success():
+                return True
+            log.warning("Delete message failed: code=%s msg=%s", resp.code, resp.msg)
+            return False
+        except Exception:
+            log.exception("Delete message error")
+            return False

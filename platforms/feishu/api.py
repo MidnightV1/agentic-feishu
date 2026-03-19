@@ -390,6 +390,112 @@ class FeishuAPI:
         except Exception as e:
             return [{"error": str(e)}]
 
+    async def list_comments(self, document_id: str) -> list:
+        """List all comments on a document with their replies."""
+        comments: list[dict] = []
+        page_token: str | None = None
+        while True:
+            params: dict[str, Any] = {"file_type": "docx"}
+            if page_token:
+                params["page_token"] = page_token
+            data = await self._raw_request(
+                "GET",
+                f"/open-apis/drive/v1/files/{document_id}/comments",
+                params=params,
+            )
+            if data.get("code") != 0:
+                return [{"error": f"{data.get('code')}: {data.get('msg')}"}]
+            for item in data.get("data", {}).get("items", []):
+                comments.append({
+                    "comment_id": item.get("comment_id", ""),
+                    "quote": item.get("quote", ""),
+                    "is_resolved": item.get("is_resolved", False),
+                    "replies": [
+                        {
+                            "reply_id": r.get("reply_id", ""),
+                            "content": r.get("content", {}).get("text", "") if isinstance(r.get("content"), dict) else str(r.get("content", "")),
+                            "user_id": r.get("user_id", ""),
+                        }
+                        for r in item.get("reply_list", {}).get("replies", [])
+                    ],
+                })
+            if data.get("data", {}).get("has_more"):
+                page_token = data["data"].get("page_token")
+            else:
+                break
+        return comments
+
+    async def reply_comment(self, document_id: str, comment_id: str, content: str) -> dict:
+        """Reply to a comment on a document."""
+        data = await self._raw_request(
+            "POST",
+            f"/open-apis/drive/v1/files/{document_id}/comments/{comment_id}/replies",
+            body={"content": content},
+            params={"file_type": "docx"},
+        )
+        if data.get("code") != 0:
+            return {"error": f"{data.get('code')}: {data.get('msg')}"}
+        return {"ok": True, "reply": data.get("data", {}).get("reply", {})}
+
+    async def update_document(self, document_id: str, content: str) -> dict:
+        """Replace all document content (keeps title).
+
+        1. Fetch all blocks
+        2. Delete child blocks of root (skip page/title block)
+        3. Append new content
+        """
+        # Step 1: Get all blocks
+        blocks_data = await self._raw_request(
+            "GET",
+            f"/open-apis/docx/v1/documents/{document_id}/blocks",
+            params={"document_revision_id": "-1"},
+        )
+        if blocks_data.get("code") != 0:
+            return {"error": f"get_blocks: {blocks_data.get('code')}: {blocks_data.get('msg')}"}
+
+        items = blocks_data.get("data", {}).get("items", [])
+        if not items:
+            # No blocks at all, just append
+            return await self.append_document(document_id, content)
+
+        # The first block is the page/document block; its children are the content blocks
+        page_block = items[0]
+        child_ids = page_block.get("page", {}).get("body", {}).get("blocks", [])
+        if not child_ids:
+            # Try alternative structure
+            child_ids = [
+                b["block_id"] for b in items[1:]
+                if b.get("parent_id") == document_id
+            ]
+
+        # Step 2: Delete all child blocks (batch delete, up to 50 per request)
+        for i in range(0, len(child_ids), 50):
+            batch = child_ids[i:i + 50]
+            del_data = await self._raw_request(
+                "DELETE",
+                f"/open-apis/docx/v1/documents/{document_id}/blocks/{document_id}/children/batch_delete",
+                body={"start_index": 0, "end_index": len(batch)},
+                params={"document_revision_id": "-1"},
+            )
+            if del_data.get("code") != 0:
+                log.warning("delete_blocks partial failure: %s | doc=%s",
+                            del_data.get("msg"), document_id)
+
+        # Step 3: Append new content
+        return await self.append_document(document_id, content)
+
+    async def transfer_document_owner(self, document_id: str, new_owner_id: str) -> dict:
+        """Transfer document ownership to another user (by open_id)."""
+        data = await self._raw_request(
+            "POST",
+            f"/open-apis/drive/v1/permissions/{document_id}/members/transfer_owner",
+            body={"member_type": "openid", "member_id": new_owner_id},
+            params={"type": "docx"},
+        )
+        if data.get("code") != 0:
+            return {"error": f"{data.get('code')}: {data.get('msg')}"}
+        return {"ok": True, "new_owner": new_owner_id}
+
     # ── Tasks ─────────────────────────────────────────────────────
 
     _tasklist_guid: str | None = None

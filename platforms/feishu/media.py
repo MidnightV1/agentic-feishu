@@ -11,8 +11,10 @@ Downloads media from Feishu API, processes based on type:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -146,6 +148,120 @@ class MediaHandler:
         except Exception as e:
             log.warning("Audio processing failed: %s", e)
             return f"[语音处理失败: {e}]"
+
+    # ── Content Parsing ────────────────────────────────────────────
+
+    @staticmethod
+    def parse_content(msg_type: str, content_str: str) -> str:
+        """Parse Feishu message content to plain text.
+
+        Handles: text, post, interactive (card), markdown.
+        For unknown types, attempts best-effort extraction.
+        """
+        try:
+            content = (
+                json.loads(content_str) if isinstance(content_str, str) else content_str
+            )
+        except json.JSONDecodeError:
+            return content_str if isinstance(content_str, str) else ""
+
+        if not isinstance(content, dict):
+            return str(content) if content else ""
+
+        if msg_type == "text":
+            text = content.get("text", "")
+            # Strip @_user_N_ mention placeholders
+            return re.sub(r"@_user_\d+\s*", "", text).strip()
+
+        if msg_type == "post":
+            return MediaHandler._parse_post(content)
+
+        if msg_type == "interactive":
+            return MediaHandler._parse_card(content)
+
+        if msg_type == "markdown":
+            return content.get("text", "")
+
+        # Fallback: try common fields
+        for key in ("text", "content"):
+            val = content.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+        return ""
+
+    @staticmethod
+    def _parse_post(content: dict) -> str:
+        """Parse rich-text post content.
+
+        Handles both flat {title, content: [[...]]} and
+        multi-language {zh_cn: {title, content}} structures.
+        """
+        # Flat structure (most common)
+        if "content" in content and isinstance(content["content"], list):
+            return MediaHandler._extract_post_body(content)
+        # Multi-language — use first available
+        for lang_content in content.values():
+            if isinstance(lang_content, dict) and "content" in lang_content:
+                return MediaHandler._extract_post_body(lang_content)
+        return ""
+
+    @staticmethod
+    def _extract_post_body(post: dict) -> str:
+        """Extract text from a single post body {title, content: [[elements]]}."""
+        lines: list[str] = []
+        title = post.get("title")
+        if title:
+            lines.append(title)
+        for para in post.get("content", []):
+            if not isinstance(para, list):
+                continue
+            parts: list[str] = []
+            for elem in para:
+                tag = elem.get("tag", "")
+                if tag == "text":
+                    parts.append(elem.get("text", ""))
+                elif tag == "a":
+                    text = elem.get("text", "")
+                    href = elem.get("href", "")
+                    parts.append(f"[{text}]({href})" if href else text)
+                elif tag == "at":
+                    parts.append(elem.get("name", ""))
+                # img, media, hr — skip, no text content
+            if parts:
+                lines.append("".join(parts))
+        return "\n".join(lines)
+
+    @staticmethod
+    def _parse_card(content: dict) -> str:
+        """Extract text from an interactive card.
+
+        Supports JSON 2.0 (body.elements) and legacy 1.0 (elements) formats.
+        """
+        parts: list[str] = []
+
+        # Header title
+        header = content.get("header", {})
+        title_obj = header.get("title", {})
+        title_text = title_obj.get("content", "")
+        if title_text:
+            parts.append(title_text)
+
+        # JSON 2.0: body.elements[].tag=="markdown"
+        for el in content.get("body", {}).get("elements", []):
+            if isinstance(el, dict) and el.get("tag") == "markdown":
+                parts.append(el.get("content", ""))
+
+        # Fallback: JSON 1.0 legacy / degraded format
+        for el in content.get("elements", []):
+            if isinstance(el, dict):
+                if el.get("tag") == "markdown":
+                    parts.append(el.get("content", ""))
+                elif el.get("tag") == "div":
+                    text_obj = el.get("text", {})
+                    if isinstance(text_obj, dict):
+                        parts.append(text_obj.get("content", ""))
+
+        return "\n".join(p for p in parts if p)
 
     # ── Internal ──────────────────────────────────────────────────
 

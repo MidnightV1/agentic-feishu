@@ -223,6 +223,38 @@ class ToolRegistry:
                 count += 1
         return count
 
+    def discover_directory(self, directory: str | Path) -> int:
+        """Auto-discover @tool functions from all .py files in a directory.
+
+        Returns total count of registered tools.
+        """
+        import importlib.util
+        from pathlib import Path as P
+
+        d = P(directory)
+        if not d.is_dir():
+            return 0
+
+        total = 0
+        for py_file in sorted(d.glob("*.py")):
+            if py_file.name.startswith("_"):
+                continue
+            try:
+                spec = importlib.util.spec_from_file_location(
+                    f"custom_tools_{py_file.stem}", str(py_file)
+                )
+                if not spec or not spec.loader:
+                    continue
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                n = self.discover(mod)
+                if n:
+                    logger.info("Discovered %d tools from %s", n, py_file.name)
+                    total += n
+            except Exception:
+                logger.exception("Failed to load tools from %s", py_file)
+        return total
+
     # -- Lookup ----------------------------------------------------------------
 
     def get_tool(self, name: str) -> Tool | None:

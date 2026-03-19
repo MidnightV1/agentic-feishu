@@ -15,7 +15,11 @@ from core.agent_loop import AgentLoop
 from core.context_manager import ContextComponent, ContextConfig, ContextManager
 from core.tool_registry import ToolRegistry
 from core.types import RunConfig
+from infra.jsonl_store import JSONLStore
 from infra.session import SessionStore
+from jobs.explorer import ExploreQueue
+from jobs.heartbeat import HeartbeatMonitor
+from jobs.scheduler import JobConfig, Scheduler
 from platforms.feishu.adapter import FeishuAdapter
 from platforms.feishu.api import FeishuAPI
 from platforms.feishu.dispatcher import FeishuDispatcher
@@ -23,7 +27,10 @@ from platforms.feishu.media import MediaHandler
 from platforms.feishu.prompts import FEISHU_SYSTEM_PROMPT
 from providers.factory import create_provider
 from skills.loader import load_skills
-from tools.builtin import bitable_tools, feishu_tools, general_tools
+from tools.builtin import (
+    bitable_tools, drive_tools, feishu_tools,
+    general_tools, perm_tools, sheet_tools,
+)
 
 log = logging.getLogger("agentic-feishu")
 
@@ -76,6 +83,28 @@ async def main() -> None:
     bitable_tools.configure(feishu_api)
     n = registry.discover(bitable_tools)
     log.info("Registered %d Bitable tools", n)
+
+    # Sheet tools
+    sheet_tools.configure(feishu_api)
+    n = registry.discover(sheet_tools)
+    log.info("Registered %d Sheet tools", n)
+
+    # Drive tools
+    drive_tools.configure(feishu_api)
+    n = registry.discover(drive_tools)
+    log.info("Registered %d Drive tools", n)
+
+    # Permission tools
+    perm_tools.configure(feishu_api)
+    n = registry.discover(perm_tools)
+    log.info("Registered %d Permission tools", n)
+
+    # ── Custom tools (auto-discover) ─────────────────────────────
+    custom_dir = Path(__file__).parent / "tools" / "custom"
+    if custom_dir.is_dir():
+        n = registry.discover_directory(custom_dir)
+        if n:
+            log.info("Discovered %d custom tools", n)
 
     # ── Skills ────────────────────────────────────────────────────
     skills_dir = Path(__file__).parent / "skills"
@@ -131,6 +160,22 @@ async def main() -> None:
     )
     await dispatcher.start()
 
+    # ── Usage tracker ────────────────────────────────────────────
+    from infra.usage import UsageTracker
+    usage_tracker = UsageTracker(os.path.join(settings.data_dir, "usage.jsonl"))
+
+    # ── JSONL backup ─────────────────────────────────────────────
+    jsonl_store = JSONLStore(os.path.join(settings.data_dir, "sessions"))
+
+    # ── Explore queue ──────────────────────────────────────────────
+    explore_queue = ExploreQueue(os.path.join(settings.data_dir, "explore.jsonl"))
+
+    async def _on_explore(hints: str) -> None:
+        """Process explore hints from LLM output."""
+        count = explore_queue.add_from_hints(hints)
+        if count:
+            log.info("Added %d explore items from LLM hints", count)
+
     # ── Media handler ─────────────────────────────────────────────
     media_handler = MediaHandler(api=feishu_api, data_dir=settings.data_dir)
 
@@ -143,9 +188,24 @@ async def main() -> None:
         session_store=session_store,
         run_config=run_config,
         system_prompt=system_prompt,
+        on_explore=_on_explore,
     )
     adapter.set_media_handler(media_handler, feishu_api)
     await adapter.start()
+
+    # ── Heartbeat + Scheduler ─────────────────────────────────────
+    heartbeat = HeartbeatMonitor(
+        usage_tracker=usage_tracker,
+        daily_budget_usd=settings.max_budget_usd * 10,  # daily = 10x per-request
+    )
+    scheduler = Scheduler()
+    scheduler.add_job(JobConfig(
+        name="heartbeat",
+        handler=heartbeat.check,
+        interval_seconds=300,  # 5 min
+        enabled=True,
+    ))
+    await scheduler.start()
 
     log.info("agentic-feishu ready — listening for messages")
 
@@ -164,6 +224,7 @@ async def main() -> None:
         await stop_event.wait()
     finally:
         log.info("Shutting down...")
+        await scheduler.stop()
         await adapter.stop()
         await dispatcher.stop()
         await feishu_api.stop()

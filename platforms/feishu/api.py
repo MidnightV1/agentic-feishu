@@ -484,3 +484,262 @@ class FeishuAPI:
                 return {"record_id": record_id, "deleted": True}
         except Exception as e:
             return {"error": str(e)}
+
+    # ── Spreadsheet ────────────────────────────────────────────────
+
+    async def get_spreadsheet_info(self, spreadsheet_token: str) -> dict:
+        """Get spreadsheet metadata and worksheet list."""
+        token = await self._get_tenant_token()
+        url = f"{self.domain}/open-apis/sheets/v3/spreadsheets/{spreadsheet_token}/sheets/query"
+        try:
+            async with httpx.AsyncClient() as http:
+                resp = await http.get(
+                    url, headers={"Authorization": f"Bearer {token}"}, timeout=30,
+                )
+                data = resp.json()
+                if data.get("code") != 0:
+                    return {"error": f"{data.get('code')}: {data.get('msg')}"}
+                sheets = data.get("data", {}).get("sheets", [])
+                return {
+                    "spreadsheet_token": spreadsheet_token,
+                    "sheets": [
+                        {"sheet_id": s["sheet_id"], "title": s.get("title", "")}
+                        for s in sheets
+                    ],
+                }
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def read_sheet_range(
+        self, spreadsheet_token: str, sheet_id: str, range_str: str
+    ) -> list:
+        """Read cell values from a spreadsheet range."""
+        token = await self._get_tenant_token()
+        full_range = f"{sheet_id}!{range_str}"
+        url = (
+            f"{self.domain}/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}"
+            f"/values/{full_range}"
+        )
+        try:
+            async with httpx.AsyncClient() as http:
+                resp = await http.get(
+                    url, headers={"Authorization": f"Bearer {token}"}, timeout=30,
+                )
+                data = resp.json()
+                if data.get("code") != 0:
+                    return [{"error": f"{data.get('code')}: {data.get('msg')}"}]
+                return data.get("data", {}).get("valueRange", {}).get("values", [])
+        except Exception as e:
+            return [{"error": str(e)}]
+
+    async def write_sheet_range(
+        self, spreadsheet_token: str, sheet_id: str, range_str: str, values: list
+    ) -> dict:
+        """Write values to a spreadsheet range."""
+        token = await self._get_tenant_token()
+        full_range = f"{sheet_id}!{range_str}"
+        url = (
+            f"{self.domain}/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}"
+            f"/values"
+        )
+        body = {
+            "valueRange": {
+                "range": full_range,
+                "values": values,
+            }
+        }
+        try:
+            async with httpx.AsyncClient() as http:
+                resp = await http.put(
+                    url, headers={"Authorization": f"Bearer {token}"},
+                    json=body, timeout=30,
+                )
+                data = resp.json()
+                if data.get("code") != 0:
+                    return {"error": f"{data.get('code')}: {data.get('msg')}"}
+                return {"ok": True, "range": full_range}
+        except Exception as e:
+            return {"error": str(e)}
+
+    # ── Drive ──────────────────────────────────────────────────────
+
+    async def list_drive_files(
+        self, folder_token: str = "", page_size: int = 20
+    ) -> list:
+        """List files in a Drive folder."""
+        token = await self._get_tenant_token()
+        url = f"{self.domain}/open-apis/drive/v1/files"
+        params: dict[str, Any] = {"page_size": min(page_size, 50)}
+        if folder_token:
+            params["folder_token"] = folder_token
+        try:
+            async with httpx.AsyncClient() as http:
+                resp = await http.get(
+                    url, headers={"Authorization": f"Bearer {token}"},
+                    params=params, timeout=30,
+                )
+                data = resp.json()
+                if data.get("code") != 0:
+                    return [{"error": f"{data.get('code')}: {data.get('msg')}"}]
+                items = data.get("data", {}).get("files", [])
+                return [
+                    {
+                        "token": f.get("token", ""),
+                        "name": f.get("name", ""),
+                        "type": f.get("type", ""),
+                        "url": f.get("url", ""),
+                    }
+                    for f in items
+                ]
+        except Exception as e:
+            return [{"error": str(e)}]
+
+    async def search_drive(self, query: str, count: int = 10) -> list:
+        """Search files by name in Drive."""
+        token = await self._get_tenant_token()
+        url = f"{self.domain}/open-apis/suite/docs-api/search/object"
+        body = {"search_key": query, "count": min(count, 50), "docs_types": []}
+        try:
+            async with httpx.AsyncClient() as http:
+                resp = await http.post(
+                    url, headers={"Authorization": f"Bearer {token}"},
+                    json=body, timeout=30,
+                )
+                data = resp.json()
+                if data.get("code") != 0:
+                    return [{"error": f"{data.get('code')}: {data.get('msg')}"}]
+                items = data.get("data", {}).get("docs_entities", [])
+                return [
+                    {
+                        "token": d.get("docs_token", ""),
+                        "title": d.get("title", ""),
+                        "type": d.get("docs_type", ""),
+                        "url": d.get("url", ""),
+                    }
+                    for d in items
+                ]
+        except Exception as e:
+            return [{"error": str(e)}]
+
+    async def create_drive_folder(self, name: str, parent_token: str = "") -> dict:
+        """Create a folder in Drive."""
+        token = await self._get_tenant_token()
+        url = f"{self.domain}/open-apis/drive/v1/files/create_folder"
+        body: dict[str, Any] = {"name": name}
+        if parent_token:
+            body["folder_token"] = parent_token
+        try:
+            async with httpx.AsyncClient() as http:
+                resp = await http.post(
+                    url, headers={"Authorization": f"Bearer {token}"},
+                    json=body, timeout=30,
+                )
+                data = resp.json()
+                if data.get("code") != 0:
+                    return {"error": f"{data.get('code')}: {data.get('msg')}"}
+                return {"token": data.get("data", {}).get("token", ""), "ok": True}
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def move_drive_file(self, file_token: str, target_folder_token: str) -> dict:
+        """Move a file/folder to another folder."""
+        token = await self._get_tenant_token()
+        url = f"{self.domain}/open-apis/drive/v1/files/{file_token}/move"
+        body = {"folder_token": target_folder_token}
+        try:
+            async with httpx.AsyncClient() as http:
+                resp = await http.post(
+                    url, headers={"Authorization": f"Bearer {token}"},
+                    json=body, timeout=30,
+                )
+                data = resp.json()
+                if data.get("code") != 0:
+                    return {"error": f"{data.get('code')}: {data.get('msg')}"}
+                return {"ok": True}
+        except Exception as e:
+            return {"error": str(e)}
+
+    # ── Permission ─────────────────────────────────────────────────
+
+    async def add_collaborator(
+        self,
+        doc_token: str,
+        member_id: str,
+        perm: str = "full_access",
+        member_type: str = "openid",
+        doc_type: str = "docx",
+    ) -> dict:
+        """Add a collaborator to a document."""
+        token = await self._get_tenant_token()
+        url = (
+            f"{self.domain}/open-apis/drive/v1/permissions/{doc_token}"
+            f"/members?type={doc_type}"
+        )
+        body = {
+            "member_type": member_type,
+            "member_id": member_id,
+            "perm": perm,
+        }
+        try:
+            async with httpx.AsyncClient() as http:
+                resp = await http.post(
+                    url, headers={"Authorization": f"Bearer {token}"},
+                    json=body, timeout=30,
+                )
+                data = resp.json()
+                if data.get("code") != 0:
+                    return {"error": f"{data.get('code')}: {data.get('msg')}"}
+                return {"ok": True, "member_id": member_id, "perm": perm}
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def remove_collaborator(
+        self,
+        doc_token: str,
+        member_id: str,
+        member_type: str = "openid",
+        doc_type: str = "docx",
+    ) -> dict:
+        """Remove a collaborator from a document."""
+        token = await self._get_tenant_token()
+        url = (
+            f"{self.domain}/open-apis/drive/v1/permissions/{doc_token}"
+            f"/members/{member_id}?type={doc_type}&member_type={member_type}"
+        )
+        try:
+            async with httpx.AsyncClient() as http:
+                resp = await http.delete(
+                    url, headers={"Authorization": f"Bearer {token}"}, timeout=30,
+                )
+                data = resp.json()
+                if data.get("code") != 0:
+                    return {"error": f"{data.get('code')}: {data.get('msg')}"}
+                return {"ok": True, "removed": member_id}
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def set_public_sharing(
+        self,
+        doc_token: str,
+        link_share_entity: str = "tenant_readable",
+        doc_type: str = "docx",
+    ) -> dict:
+        """Set public sharing level for a document."""
+        token = await self._get_tenant_token()
+        url = (
+            f"{self.domain}/open-apis/drive/v1/permissions/{doc_token}"
+            f"/public?type={doc_type}"
+        )
+        body = {"link_share_entity": link_share_entity}
+        try:
+            async with httpx.AsyncClient() as http:
+                resp = await http.patch(
+                    url, headers={"Authorization": f"Bearer {token}"},
+                    json=body, timeout=30,
+                )
+                data = resp.json()
+                if data.get("code") != 0:
+                    return {"error": f"{data.get('code')}: {data.get('msg')}"}
+                return {"ok": True, "link_share_entity": link_share_entity}
+        except Exception as e:
+            return {"error": str(e)}

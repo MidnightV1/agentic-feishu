@@ -952,6 +952,160 @@ class FeishuAPI:
         except Exception as e:
             return {"error": str(e)}
 
+    async def freebusy(
+        self,
+        start_time: str,
+        end_time: str,
+        user_ids: list[str] | None = None,
+    ) -> dict:
+        """Query free/busy status for a time range.
+
+        Args:
+            start_time: Start time (ISO 8601, datetime string, or Unix timestamp)
+            end_time: End time (same formats)
+            user_ids: Optional list of open_ids to query. If empty, queries the bot's own calendar.
+
+        Returns:
+            dict with "busy_list" (list of busy intervals) or "error".
+        """
+        body: dict[str, Any] = {
+            "time_min": _to_timestamp(start_time),
+            "time_max": _to_timestamp(end_time),
+        }
+        if user_ids:
+            # API accepts a single user_id per request; batch by calling multiple
+            # For simplicity, query first user_id if provided
+            body["user_id"] = {"open_id": user_ids[0]}
+
+        # Try SDK first
+        try:
+            client = self._ensure_client()
+            from lark_oapi.api.calendar.v4 import (
+                FreebusyListRequest,
+                FreebusyListRequestBody,
+            )
+
+            req_body_builder = FreebusyListRequestBody.builder()
+            req_body_builder = req_body_builder.time_min(body["time_min"])
+            req_body_builder = req_body_builder.time_max(body["time_max"])
+            if "user_id" in body:
+                req_body_builder = req_body_builder.user_id(body["user_id"])
+
+            req = (
+                FreebusyListRequest.builder()
+                .request_body(req_body_builder.build())
+                .build()
+            )
+            resp = await client.calendar.v4.freebusy.alist(req)
+            if resp.success():
+                freebusy_list = resp.data.freebusy_list or []
+                return {
+                    "busy_list": [
+                        {
+                            "start_time": getattr(fb, "start_time", ""),
+                            "end_time": getattr(fb, "end_time", ""),
+                        }
+                        for fb in freebusy_list
+                    ]
+                }
+            # SDK call failed, fall through to raw HTTP
+            log.warning("freebusy SDK failed: %s %s, trying raw HTTP", resp.code, resp.msg)
+        except (ImportError, AttributeError) as e:
+            log.info("freebusy SDK class not available (%s), using raw HTTP", e)
+
+        # Fallback: raw HTTP
+        data = await self._raw_request(
+            "POST",
+            "/open-apis/calendar/v4/freebusy/list",
+            body=body,
+        )
+        if data.get("code") != 0:
+            return {"error": f"{data.get('code')}: {data.get('msg')}"}
+        freebusy_list = data.get("data", {}).get("freebusy_list", [])
+        return {
+            "busy_list": [
+                {
+                    "start_time": fb.get("start_time", ""),
+                    "end_time": fb.get("end_time", ""),
+                }
+                for fb in freebusy_list
+            ]
+        }
+
+    async def get_merged_forward_messages(self, message_id: str) -> list[dict]:
+        """Get sub-messages from a merged forward message.
+
+        Fetches the message, parses the merged content to extract
+        individual sub-messages, and returns their text content.
+
+        Args:
+            message_id: The merged forward message ID.
+
+        Returns:
+            List of dicts with "msg_type" and "content" for each sub-message.
+        """
+        # Step 1: Get the merged forward message itself
+        data = await self._raw_request(
+            "GET",
+            f"/open-apis/im/v1/messages/{message_id}",
+        )
+        if data.get("code") != 0:
+            return [{"error": f"{data.get('code')}: {data.get('msg')}"}]
+
+        items = data.get("data", {}).get("items", [])
+        if not items:
+            return [{"error": "Message not found"}]
+
+        msg = items[0]
+        msg_type = msg.get("msg_type", "")
+
+        # If not a merge_forward, return the message itself
+        if msg_type != "merge_forward":
+            return [{"msg_type": msg_type, "content": msg.get("body", {}).get("content", "")}]
+
+        # Step 2: Parse the merged forward content for sub-message IDs
+        content_str = msg.get("body", {}).get("content", "")
+        try:
+            content = json.loads(content_str) if isinstance(content_str, str) else content_str
+        except (json.JSONDecodeError, TypeError):
+            content = {}
+
+        # Merged forward content contains message_id list
+        sub_message_ids = content.get("message_id_list", [])
+        if not sub_message_ids:
+            # Try alternative: some versions put messages inline
+            messages = content.get("messages", [])
+            if messages:
+                return [
+                    {
+                        "msg_type": m.get("msg_type", "unknown"),
+                        "content": m.get("body", {}).get("content", "")
+                        if isinstance(m.get("body"), dict)
+                        else str(m.get("content", "")),
+                    }
+                    for m in messages
+                ]
+            return [{"error": "No sub-messages found in merged forward"}]
+
+        # Step 3: Fetch each sub-message
+        results: list[dict] = []
+        for sub_id in sub_message_ids:
+            sub_data = await self._raw_request(
+                "GET",
+                f"/open-apis/im/v1/messages/{sub_id}",
+            )
+            if sub_data.get("code") != 0:
+                results.append({"msg_type": "error", "content": f"Failed to fetch {sub_id}"})
+                continue
+            sub_items = sub_data.get("data", {}).get("items", [])
+            if sub_items:
+                sub_msg = sub_items[0]
+                results.append({
+                    "msg_type": sub_msg.get("msg_type", "unknown"),
+                    "content": sub_msg.get("body", {}).get("content", ""),
+                })
+        return results
+
     # ── Media download ─────────────────────────────────────────────
 
     async def download_resource(
@@ -1347,6 +1501,276 @@ class FeishuAPI:
                 return {"ok": True, "removed": member_id}
         except Exception as e:
             return {"error": str(e)}
+
+    # ── Document: section replace ───────────────────────────────
+
+    async def get_document_blocks(self, document_id: str) -> list[dict]:
+        """Get all blocks from a document, handling pagination."""
+        all_items: list[dict] = []
+        page_token: str | None = None
+        while True:
+            params: dict[str, Any] = {"document_revision_id": "-1", "page_size": "500"}
+            if page_token:
+                params["page_token"] = page_token
+            data = await self._raw_request(
+                "GET",
+                f"/open-apis/docx/v1/documents/{document_id}/blocks",
+                params=params,
+            )
+            if data.get("code") != 0:
+                log.error("get_document_blocks failed: %s | doc=%s", data.get("msg"), document_id)
+                break
+            all_items.extend(data.get("data", {}).get("items", []))
+            if data.get("data", {}).get("has_more"):
+                page_token = data["data"].get("page_token")
+            else:
+                break
+        return all_items
+
+    def _block_heading_level(self, block: dict) -> int | None:
+        """Return heading level (1-6) if block is a heading, else None.
+
+        Block types 3-8 map to heading1-heading6.
+        """
+        bt = block.get("block_type")
+        if bt is not None and 3 <= bt <= 8:
+            return bt - 2  # type 3 → level 1, type 4 → level 2, ...
+        return None
+
+    def _block_text_content(self, block: dict) -> str:
+        """Extract plain text from a block's elements."""
+        for key in ("heading1", "heading2", "heading3", "heading4", "heading5", "heading6", "text"):
+            section = block.get(key)
+            if section and "elements" in section:
+                parts: list[str] = []
+                for el in section["elements"]:
+                    tr = el.get("text_run")
+                    if tr:
+                        parts.append(tr.get("content", ""))
+                return "".join(parts)
+        return ""
+
+    async def replace_section(self, document_id: str, heading_title: str, new_content: str) -> dict:
+        """Replace a document section identified by heading title.
+
+        Finds the heading block matching heading_title, deletes all blocks from
+        that heading to the next heading of the same or higher level (or end of
+        document), then appends new_content at the end of the document.
+
+        Returns: {"ok": True, "deleted": N, "appended": dict} or {"error": ...}
+        """
+        blocks = await self.get_document_blocks(document_id)
+        if not blocks:
+            return {"error": "No blocks found in document"}
+
+        # Build ordered list of content blocks (skip page block at index 0)
+        page_block = blocks[0]
+        child_ids = page_block.get("page", {}).get("body", {}).get("blocks", [])
+        if not child_ids:
+            child_ids = [
+                b["block_id"] for b in blocks[1:]
+                if b.get("parent_id") == document_id
+            ]
+
+        # Create block_id → block lookup
+        block_map = {b["block_id"]: b for b in blocks}
+
+        # Find the heading block matching heading_title
+        start_idx: int | None = None
+        section_level: int | None = None
+        for i, bid in enumerate(child_ids):
+            b = block_map.get(bid)
+            if not b:
+                continue
+            level = self._block_heading_level(b)
+            if level is not None:
+                text = self._block_text_content(b).strip()
+                if text == heading_title.strip():
+                    start_idx = i
+                    section_level = level
+                    break
+
+        if start_idx is None:
+            return {"error": f"Heading '{heading_title}' not found"}
+
+        # Find the end of the section (next heading of same or higher level)
+        end_idx = len(child_ids)  # default: end of document
+        for i in range(start_idx + 1, len(child_ids)):
+            b = block_map.get(child_ids[i])
+            if not b:
+                continue
+            level = self._block_heading_level(b)
+            if level is not None and level <= section_level:
+                end_idx = i
+                break
+
+        # Collect block IDs to delete
+        to_delete = child_ids[start_idx:end_idx]
+        if not to_delete:
+            return {"error": "No blocks to delete in section"}
+
+        # Delete blocks using batch_delete (index-based on the page block's children)
+        # After each batch delete, indices shift, so always delete from start_idx.
+        remaining = len(to_delete)
+        deleted = 0
+        while remaining > 0:
+            batch_size = min(remaining, 50)
+            del_data = await self._raw_request(
+                "DELETE",
+                f"/open-apis/docx/v1/documents/{document_id}/blocks/{document_id}/children/batch_delete",
+                body={"start_index": start_idx, "end_index": start_idx + batch_size},
+                params={"document_revision_id": "-1"},
+            )
+            if del_data.get("code") != 0:
+                log.warning("replace_section delete failed at batch: %s | doc=%s",
+                            del_data.get("msg"), document_id)
+                break
+            deleted += batch_size
+            remaining -= batch_size
+
+        # Append new content
+        appended = await self.append_document(document_id, new_content)
+        return {"ok": True, "deleted": deleted, "appended": appended}
+
+    # ── Tasks: assign/unassign + sections + snapshot ──────────
+
+    async def assign_task(self, task_id: str, open_ids: list[str]) -> dict:
+        """Assign users to a task.
+
+        Args:
+            task_id: The task GUID
+            open_ids: List of user open_ids to assign
+        """
+        members = [
+            {"id": oid, "type": "user", "role": "assignee"}
+            for oid in open_ids
+        ]
+        data = await self._raw_request(
+            "POST",
+            f"/open-apis/task/v2/tasks/{task_id}/add_members",
+            body={"members": members},
+        )
+        if data.get("code") != 0:
+            return {"error": f"{data.get('code')}: {data.get('msg')}"}
+        return {"ok": True, "task_id": task_id, "assigned": open_ids}
+
+    async def unassign_task(self, task_id: str, open_ids: list[str]) -> dict:
+        """Remove users from a task.
+
+        Args:
+            task_id: The task GUID
+            open_ids: List of user open_ids to unassign
+        """
+        members = [
+            {"id": oid, "type": "user", "role": "assignee"}
+            for oid in open_ids
+        ]
+        data = await self._raw_request(
+            "POST",
+            f"/open-apis/task/v2/tasks/{task_id}/remove_members",
+            body={"members": members},
+        )
+        if data.get("code") != 0:
+            return {"error": f"{data.get('code')}: {data.get('msg')}"}
+        return {"ok": True, "task_id": task_id, "unassigned": open_ids}
+
+    async def create_task_section(self, name: str) -> dict:
+        """Create a section in the bot's tasklist.
+
+        Args:
+            name: Section name
+        """
+        tasklist_guid = await self._ensure_tasklist_guid()
+        data = await self._raw_request(
+            "POST",
+            f"/open-apis/task/v2/tasklists/{tasklist_guid}/sections",
+            body={"name": name},
+        )
+        if data.get("code") != 0:
+            return {"error": f"{data.get('code')}: {data.get('msg')}"}
+        section = data.get("data", {}).get("section", {})
+        return {
+            "ok": True,
+            "section_guid": section.get("guid", ""),
+            "name": section.get("name", name),
+        }
+
+    async def list_task_sections(self) -> list:
+        """List all sections in the bot's tasklist."""
+        tasklist_guid = await self._ensure_tasklist_guid()
+        data = await self._raw_request(
+            "GET",
+            f"/open-apis/task/v2/tasklists/{tasklist_guid}/sections",
+        )
+        if data.get("code") != 0:
+            return [{"error": f"{data.get('code')}: {data.get('msg')}"}]
+        items = data.get("data", {}).get("items", [])
+        return [
+            {"section_guid": s.get("guid", ""), "name": s.get("name", "")}
+            for s in items
+        ]
+
+    async def task_snapshot(self) -> str:
+        """Get a categorized snapshot of all open tasks.
+
+        Returns formatted text with tasks grouped by: overdue, due_soon (within
+        2 hours), and open (no due or future due).
+        """
+        tasks = await self.list_tasks(completed=False)
+        if not tasks or (len(tasks) == 1 and "error" in tasks[0]):
+            return "No open tasks."
+
+        now = time.time()
+        two_hours = now + 2 * 3600
+
+        overdue: list[dict] = []
+        due_soon: list[dict] = []
+        open_tasks: list[dict] = []
+
+        for t in tasks:
+            # Fetch full details to get due date
+            detail = await self.get_task(t["task_id"])
+            due_ts = detail.get("due", "")
+            summary = detail.get("summary", t.get("summary", ""))
+
+            entry = {"task_id": t["task_id"], "summary": summary, "due": due_ts}
+
+            if due_ts:
+                try:
+                    ts = float(due_ts)
+                    if ts < now:
+                        overdue.append(entry)
+                    elif ts < two_hours:
+                        due_soon.append(entry)
+                    else:
+                        open_tasks.append(entry)
+                except (ValueError, TypeError):
+                    open_tasks.append(entry)
+            else:
+                open_tasks.append(entry)
+
+        lines: list[str] = []
+
+        if overdue:
+            lines.append(f"**Overdue ({len(overdue)})**")
+            for t in overdue:
+                lines.append(f"  - {t['summary']} (id: {t['task_id']})")
+
+        if due_soon:
+            lines.append(f"**Due Soon ({len(due_soon)})**")
+            for t in due_soon:
+                lines.append(f"  - {t['summary']} (id: {t['task_id']})")
+
+        if open_tasks:
+            lines.append(f"**Open ({len(open_tasks)})**")
+            for t in open_tasks:
+                lines.append(f"  - {t['summary']} (id: {t['task_id']})")
+
+        if not lines:
+            return "No open tasks."
+        return "\n".join(lines)
+
+    # ── Permission ─────────────────────────────────────────────
 
     async def set_public_sharing(
         self,

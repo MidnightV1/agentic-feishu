@@ -216,6 +216,99 @@ class SessionStore:
                 for row in rows
             ]
 
+    async def get_recent_messages(
+        self,
+        session_key: str,
+        limit: int = 15,
+        truncate: int = 4000,
+    ) -> list[dict[str, Any]]:
+        """Get the most recent messages for a session (newest last).
+
+        Args:
+            session_key: Session identifier.
+            limit: Maximum number of messages to return (counted as individual
+                   messages, not rounds).
+            truncate: Max characters per message content. Longer content is
+                      cut and suffixed with ``…[truncated]``.
+
+        Returns:
+            List of dicts with ``role``, ``content``, ``created_at`` keys,
+            ordered oldest-first (chronological).
+        """
+        # Sub-select newest N rows, then re-order chronologically
+        async with self.db.execute(
+            """
+            SELECT role, content, created_at
+            FROM (
+                SELECT role, content, created_at
+                FROM messages
+                WHERE session_key = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+            )
+            ORDER BY created_at ASC
+            """,
+            (session_key, limit),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            result: list[dict[str, Any]] = []
+            for row in rows:
+                content = row["content"]
+                if truncate and len(content) > truncate:
+                    content = content[: truncate - 13] + "…[truncated]"
+                result.append(
+                    {
+                        "role": row["role"],
+                        "content": content,
+                        "created_at": row["created_at"],
+                    }
+                )
+            return result
+
+    async def get_recent_messages_by_prefix(
+        self,
+        session_key_prefix: str,
+        limit: int = 15,
+        truncate: int = 4000,
+    ) -> list[dict[str, Any]]:
+        """Get recent messages across all sessions matching a key prefix.
+
+        Useful for chat-level history recovery: after a session is deleted,
+        this finds messages from *any* prior session for the same chat.
+        The prefix should be e.g. ``"feishu:<chat_id>:"`` to match all
+        sessions in that chat regardless of sender.
+
+        Returns chronological order (oldest first).
+        """
+        async with self.db.execute(
+            """
+            SELECT role, content, created_at
+            FROM (
+                SELECT role, content, created_at
+                FROM messages
+                WHERE session_key LIKE ? || '%'
+                ORDER BY created_at DESC
+                LIMIT ?
+            )
+            ORDER BY created_at ASC
+            """,
+            (session_key_prefix, limit),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            result: list[dict[str, Any]] = []
+            for row in rows:
+                content = row["content"]
+                if truncate and len(content) > truncate:
+                    content = content[: truncate - 13] + "…[truncated]"
+                result.append(
+                    {
+                        "role": row["role"],
+                        "content": content,
+                        "created_at": row["created_at"],
+                    }
+                )
+            return result
+
     async def delete(self, session_key: str) -> None:
         """Delete a session and all its messages."""
         await self.db.execute(

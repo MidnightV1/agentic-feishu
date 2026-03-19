@@ -10,6 +10,7 @@ from .types import Message
 
 if TYPE_CHECKING:
     from providers.base import BaseProvider
+    from infra.session import SessionStore
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,17 @@ SUMMARY_PROMPT = """将以下对话历史压缩为结构化摘要。
 - 丢弃寒暄和已否决方案的细节
 - 优先保留最近的信息
 """
+
+
+RECOVERY_PREAMBLE = (
+    "## 会话恢复\n\n"
+    "你的上一个会话已结束，以下是之前对话的记录。\n"
+    "注意：之前的工具调用记录（文件读写、命令执行）不可访问，"
+    "如需读取文件请重新操作。"
+)
+
+RECOVERY_RECENT_ROUNDS = 15   # max messages to include in recovery
+RECOVERY_TRUNCATE = 4000      # max chars per message
 
 
 @dataclass
@@ -200,6 +212,7 @@ def _section_header(component_type: str) -> str:
         "environment": "# Environment",
         "persona": "# Persona",
         "session_context": "# Session Context",
+        "recovery": "",  # RECOVERY_PREAMBLE already has its own header
     }
     return headers.get(component_type, f"# {component_type}")
 
@@ -233,3 +246,47 @@ def _keep_recent(messages: list[Message], rounds: int) -> list[Message]:
                 cut = i
                 break
     return messages[cut:]
+
+
+# ---------------------------------------------------------------------------
+# Context recovery for session loss
+# ---------------------------------------------------------------------------
+
+
+async def build_recovery_context(
+    session_store: SessionStore,
+    session_key: str,
+    limit: int = RECOVERY_RECENT_ROUNDS,
+    truncate: int = RECOVERY_TRUNCATE,
+) -> ContextComponent | None:
+    """Build a recovery context component from stored conversation history.
+
+    Called when a new session starts for a chat that already has history
+    (restart, crash, timeout).  Returns a ``ContextComponent`` of type
+    ``"recovery"`` suitable for ``ContextManager.build_system_prompt``,
+    or ``None`` if there is no prior history to recover.
+    """
+    messages = await session_store.get_recent_messages(
+        session_key, limit=limit, truncate=truncate,
+    )
+    if not messages:
+        return None
+
+    # Format as readable transcript
+    lines: list[str] = [RECOVERY_PREAMBLE, ""]
+    role_label = {"user": "用户", "assistant": "助手", "system": "系统"}
+    for m in messages:
+        label = role_label.get(m["role"], m["role"])
+        lines.append(f"**{label}**: {m['content']}")
+    transcript = "\n\n".join(lines)
+
+    logger.info(
+        "Built recovery context for %s: %d messages, %d chars",
+        session_key, len(messages), len(transcript),
+    )
+
+    return ContextComponent(
+        type="recovery",
+        content=transcript,
+        priority=-10,  # low priority — placed after all other components
+    )

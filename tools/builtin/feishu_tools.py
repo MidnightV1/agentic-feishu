@@ -111,6 +111,23 @@ async def reply_comment(document_id: str, comment_id: str, content: str) -> dict
     return result
 
 
+@tool(description="Replace a specific section in a Feishu document (heading to next same-level heading)", parallel_safe=False)
+async def replace_section(document_id: str, heading_title: str, new_content: str) -> dict:
+    """Replace a document section identified by its heading title.
+
+    Deletes all blocks from the matched heading to the next heading of the same
+    or higher level, then appends new_content to the document.
+
+    Args:
+        document_id: The document ID
+        heading_title: Exact text of the heading to match
+        new_content: Markdown content to replace the section with
+    """
+    api = _require_api()
+    result = await api.replace_section(document_id, heading_title, new_content)
+    return result
+
+
 @tool(description="Update a Feishu document (replace all content)", parallel_safe=False)
 async def update_document(document_id: str, content: str) -> dict:
     """Update a Feishu document by replacing all content.
@@ -233,6 +250,62 @@ async def delete_task(task_id: str) -> dict:
     return result
 
 
+@tool(description="Assign users to a Feishu task", parallel_safe=False)
+async def assign_task(task_id: str, open_ids: str) -> dict:
+    """Assign one or more users to a task.
+
+    Args:
+        task_id: The task GUID
+        open_ids: Comma-separated list of user open_ids
+    """
+    api = _require_api()
+    ids = [uid.strip() for uid in open_ids.split(",") if uid.strip()]
+    result = await api.assign_task(task_id, ids)
+    return result
+
+
+@tool(description="Unassign users from a Feishu task", parallel_safe=False)
+async def unassign_task(task_id: str, open_ids: str) -> dict:
+    """Remove one or more users from a task.
+
+    Args:
+        task_id: The task GUID
+        open_ids: Comma-separated list of user open_ids
+    """
+    api = _require_api()
+    ids = [uid.strip() for uid in open_ids.split(",") if uid.strip()]
+    result = await api.unassign_task(task_id, ids)
+    return result
+
+
+@tool(description="Create a section in the Feishu bot tasklist", parallel_safe=False)
+async def create_section(name: str) -> dict:
+    """Create a section in the bot's tasklist.
+
+    Args:
+        name: Section name
+    """
+    api = _require_api()
+    result = await api.create_task_section(name)
+    return result
+
+
+@tool(description="List sections in the Feishu bot tasklist", parallel_safe=True)
+async def list_sections() -> list:
+    """List all sections in the bot's tasklist."""
+    api = _require_api()
+    result = await api.list_task_sections()
+    return result
+
+
+@tool(description="Get a categorized snapshot of all open Feishu tasks", parallel_safe=True)
+async def task_snapshot() -> str:
+    """Get a snapshot of all open tasks, categorized by: overdue, due soon, open."""
+    api = _require_api()
+    result = await api.task_snapshot()
+    return result
+
+
 # ── Message tools ─────────────────────────────────────────────────
 
 
@@ -314,6 +387,25 @@ async def update_event(
         end_time=end_time,
         description=description,
     )
+    return result
+
+
+@tool(description="Query free/busy status for a time range", parallel_safe=True)
+async def freebusy(
+    start_time: str,
+    end_time: str,
+    user_ids: str = "",
+) -> dict:
+    """Query free/busy status for a time range.
+
+    Args:
+        start_time: Start time (ISO format, e.g., 2025-12-31T09:00:00)
+        end_time: End time (ISO format, e.g., 2025-12-31T18:00:00)
+        user_ids: Comma-separated open_ids to query (empty for bot's own calendar)
+    """
+    api = _require_api()
+    ids = [uid.strip() for uid in user_ids.split(",") if uid.strip()] if user_ids else None
+    result = await api.freebusy(start_time=start_time, end_time=end_time, user_ids=ids)
     return result
 
 

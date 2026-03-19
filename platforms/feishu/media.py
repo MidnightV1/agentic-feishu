@@ -149,6 +149,64 @@ class MediaHandler:
             log.warning("Audio processing failed: %s", e)
             return f"[语音处理失败: {e}]"
 
+    @staticmethod
+    async def extract_pdf_text(file_path: str, max_pages: int = 20) -> str:
+        """Extract text from PDF. Returns extracted text or error message."""
+        try:
+            from pypdf import PdfReader
+            reader = PdfReader(file_path)
+            pages = reader.pages[:max_pages]
+            text = "\n\n".join(page.extract_text() or "" for page in pages)
+            if text.strip():
+                total = len(reader.pages)
+                suffix = f"\n\n[Extracted {min(max_pages, total)}/{total} pages]" if total > max_pages else ""
+                return text.strip() + suffix
+            return f"[PDF has {len(reader.pages)} pages but text extraction failed - may be image-based]"
+        except ImportError:
+            return f"[PDF at {file_path} - pypdf not available for text extraction]"
+        except Exception as e:
+            return f"[PDF extraction error: {e}]"
+
+    async def summarize_pdf(self, file_path: str) -> str:
+        """Extract text from a PDF for LLM processing.
+
+        Returns extracted text content. The caller (LLM session) can then
+        process/summarize the text as needed.
+        """
+        text = await self.extract_pdf_text(file_path)
+        if text.startswith("["):
+            # Extraction failed — return error message as-is
+            return text
+        # Truncate if very long (LLM context limit consideration)
+        max_chars = 50_000
+        if len(text) > max_chars:
+            text = text[:max_chars] + f"\n\n... [truncated at {max_chars} chars]"
+        return text
+
+    async def expand_merged_forward(self, message_id: str) -> list[str]:
+        """Expand a merged-forward message to get individual sub-messages as text.
+
+        Uses the FeishuAPI client to fetch sub-messages and parse their content.
+
+        Args:
+            message_id: The merged forward message ID.
+
+        Returns:
+            List of text strings extracted from sub-messages.
+        """
+        sub_messages = await self._api.get_merged_forward_messages(message_id)
+        texts: list[str] = []
+        for msg in sub_messages:
+            if "error" in msg:
+                texts.append(f"[Error: {msg['error']}]")
+                continue
+            msg_type = msg.get("msg_type", "")
+            content = msg.get("content", "")
+            parsed = self.parse_content(msg_type, content)
+            if parsed:
+                texts.append(parsed)
+        return texts
+
     # ── Content Parsing ────────────────────────────────────────────
 
     @staticmethod

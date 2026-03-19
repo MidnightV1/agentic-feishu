@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from core.agent_loop import AgentLoop
+from core.context_manager import build_recovery_context
 from core.types import Callbacks, Message, RunConfig
 from infra.session import SessionStore, SessionRecord
 from platforms.feishu.dispatcher import FeishuDispatcher
@@ -363,12 +364,27 @@ class FeishuAdapter:
             # Load session history
             session = await self._sessions.get(session_key)
             history_msgs: list[Message] = []
+            effective_system = self._system_prompt
 
             if session:
                 raw = await self._sessions.get_messages(session_key, limit=50)
                 for m in raw:
                     history_msgs.append(Message(role=m["role"], content=m["content"]))
             else:
+                # New session — check for prior chat history (recovery scenario)
+                recovery = await build_recovery_context(
+                    self._sessions, session_key,
+                )
+                if recovery:
+                    # Inject recovery context into system prompt for this run
+                    effective_system = (
+                        f"{self._system_prompt}\n\n{recovery.content}"
+                        if self._system_prompt
+                        else recovery.content
+                    )
+                    log.info("Session recovery: injected %d chars for %s",
+                             len(recovery.content), session_key)
+
                 session = SessionRecord(
                     session_key=session_key,
                     provider=self._run_config.provider,
@@ -447,7 +463,7 @@ class FeishuAdapter:
             result = await self._loop.run(
                 prompt=wrapped_prompt,
                 config=self._run_config,
-                system_prompt=self._system_prompt,
+                system_prompt=effective_system,
                 messages=history_msgs,
                 callbacks=callbacks,
             )

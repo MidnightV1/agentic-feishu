@@ -19,9 +19,11 @@ from infra.session import SessionStore
 from platforms.feishu.adapter import FeishuAdapter
 from platforms.feishu.api import FeishuAPI
 from platforms.feishu.dispatcher import FeishuDispatcher
+from platforms.feishu.media import MediaHandler
 from platforms.feishu.prompts import FEISHU_SYSTEM_PROMPT
 from providers.factory import create_provider
-from tools.builtin import feishu_tools, general_tools
+from skills.loader import load_skills
+from tools.builtin import bitable_tools, feishu_tools, general_tools
 
 log = logging.getLogger("agentic-feishu")
 
@@ -70,6 +72,15 @@ async def main() -> None:
     n = registry.discover(feishu_tools)
     log.info("Registered %d Feishu tools", n)
 
+    # Bitable tools
+    bitable_tools.configure(feishu_api)
+    n = registry.discover(bitable_tools)
+    log.info("Registered %d Bitable tools", n)
+
+    # ── Skills ────────────────────────────────────────────────────
+    skills_dir = Path(__file__).parent / "skills"
+    skill_registry = load_skills(skills_dir, registry)
+
     log.info("Tools available: %s", registry.list_tools())
 
     # ── Context manager ───────────────────────────────────────────
@@ -96,10 +107,15 @@ async def main() -> None:
 
     # ── System prompt (assembled from components) ────────────────
     persona_text = _load_persona(settings.persona)
+    skill_descriptions = skill_registry.build_descriptions()
     components = [
         ContextComponent(type="platform_rules", content=FEISHU_SYSTEM_PROMPT, priority=90),
         ContextComponent(type="persona", content=persona_text, priority=50),
     ]
+    if skill_descriptions:
+        components.append(
+            ContextComponent(type="skill_descriptions", content=skill_descriptions, priority=70)
+        )
     system_prompt = await context_mgr.build_system_prompt(components)
 
     # ── Session store ─────────────────────────────────────────────
@@ -115,6 +131,9 @@ async def main() -> None:
     )
     await dispatcher.start()
 
+    # ── Media handler ─────────────────────────────────────────────
+    media_handler = MediaHandler(api=feishu_api, data_dir=settings.data_dir)
+
     # ── Feishu adapter ────────────────────────────────────────────
     adapter = FeishuAdapter(
         app_id=settings.feishu.app_id,
@@ -125,6 +144,7 @@ async def main() -> None:
         run_config=run_config,
         system_prompt=system_prompt,
     )
+    adapter.set_media_handler(media_handler, feishu_api)
     await adapter.start()
 
     log.info("agentic-feishu ready — listening for messages")

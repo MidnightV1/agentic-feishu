@@ -23,6 +23,7 @@ from core.agent_loop import AgentLoop
 from core.types import Callbacks, Message, RunConfig
 from infra.session import SessionStore, SessionRecord
 from platforms.feishu.dispatcher import FeishuDispatcher
+from platforms.feishu.media import MediaHandler
 from platforms.feishu.tags import wrap_user_input, inject_notifications, parse_output
 
 log = logging.getLogger("agentic.feishu.adapter")
@@ -65,6 +66,12 @@ def _idle_label(elapsed: float) -> str:
     return f"💭 {label}"
 
 
+LONG_CONTENT_THRESHOLD = 3500  # chars — auto-convert to Feishu doc
+
+# Supported media message types
+_MEDIA_TYPES = {"image", "file", "audio"}
+
+
 @dataclass
 class PendingBatch:
     """Debounce buffer for multi-part messages."""
@@ -75,6 +82,7 @@ class PendingBatch:
     sender_name: str = ""
     first_message_id: str = ""
     timer: asyncio.Task | None = None
+    pending_media: int = 0  # counter for in-flight media downloads
 
 
 class FeishuAdapter:
@@ -112,11 +120,18 @@ class FeishuAdapter:
         self._system_prompt = system_prompt
         self._on_explore = on_explore
         self._on_task_plan = on_task_plan
+        self._media: MediaHandler | None = None
+        self._feishu_api: Any = None  # set by set_media_handler
 
         self._pending: dict[str, PendingBatch] = {}
         self._seen_ids: dict[str, float] = {}  # message_id → timestamp
         self._ws_client = None
         self._running = False
+
+    def set_media_handler(self, media: MediaHandler, api: Any = None) -> None:
+        """Set the media handler for processing images/files/audio."""
+        self._media = media
+        self._feishu_api = api
 
     # ── Lifecycle ──────────────────────────────────────────────────
 
@@ -251,25 +266,34 @@ class FeishuAdapter:
             self._seen_ids[message_id] = now
             self._clean_dedup(now)
 
-            # Extract text content
+            # Extract content based on message type
             msg_type = msg.message_type
-            if msg_type != "text":
-                log.debug("Skipping non-text message type: %s", msg_type)
-                return
-
             content = json.loads(msg.content or "{}")
-            text = content.get("text", "").strip()
-            if not text:
-                return
 
-            # Debounce: buffer messages from same sender in same chat
-            key = f"{chat_id}:{sender_id}"
-            loop = asyncio.get_event_loop()
-            loop.call_soon_threadsafe(
-                lambda: asyncio.ensure_future(
-                    self._buffer_message(key, text, chat_id, chat_type, sender_id, message_id)
+            if msg_type == "text":
+                text = content.get("text", "").strip()
+                if not text:
+                    return
+                key = f"{chat_id}:{sender_id}"
+                loop = asyncio.get_event_loop()
+                loop.call_soon_threadsafe(
+                    lambda: asyncio.ensure_future(
+                        self._buffer_message(key, text, chat_id, chat_type, sender_id, message_id)
+                    )
                 )
-            )
+            elif msg_type in _MEDIA_TYPES and self._media:
+                key = f"{chat_id}:{sender_id}"
+                loop = asyncio.get_event_loop()
+                loop.call_soon_threadsafe(
+                    lambda: asyncio.ensure_future(
+                        self._handle_media(
+                            msg_type, content, message_id,
+                            key, chat_id, chat_type, sender_id,
+                        )
+                    )
+                )
+            else:
+                log.debug("Skipping unsupported message type: %s", msg_type)
         except Exception:
             log.exception("Error handling message event")
 
@@ -455,6 +479,11 @@ class FeishuAdapter:
             # ── Route: reply → user ──
             reply_text = parsed.reply_text
 
+            # Long content → auto-convert to Feishu doc
+            doc_redirect = await self._maybe_convert_to_doc(reply_text, chat_id)
+            if doc_redirect:
+                reply_text = doc_redirect
+
             if reply_text:
                 if thinking_id:
                     # Replace thinking card with final reply
@@ -508,6 +537,83 @@ class FeishuAdapter:
         finally:
             if pulse_task and not pulse_task.done():
                 pulse_task.cancel()
+
+    # ── Media handling ─────────────────────────────────────────────
+
+    async def _handle_media(
+        self,
+        msg_type: str,
+        content: dict,
+        message_id: str,
+        key: str,
+        chat_id: str,
+        chat_type: str,
+        sender_id: str,
+    ) -> None:
+        """Process media messages (image/file/audio) and buffer the result."""
+        session_key = f"feishu:{chat_id}:{sender_id}"
+        result = ""
+
+        try:
+            if msg_type == "image":
+                image_key = content.get("image_key", "")
+                if image_key:
+                    result = await self._media.process_image(message_id, image_key, session_key)
+            elif msg_type == "file":
+                file_key = content.get("file_key", "")
+                file_name = content.get("file_name", "unknown")
+                if file_key:
+                    result = await self._media.process_file(
+                        message_id, file_key, file_name, session_key
+                    )
+            elif msg_type == "audio":
+                file_key = content.get("file_key", "")
+                if file_key:
+                    result = await self._media.process_audio(
+                        message_id, file_key, session_key
+                    )
+        except Exception as e:
+            log.warning("Media processing failed: %s", e)
+            result = f"[{msg_type} 处理失败: {e}]"
+
+        if result:
+            await self._buffer_message(key, result, chat_id, chat_type, sender_id, message_id)
+
+    # ── Long content → document ────────────────────────────────────
+
+    async def _maybe_convert_to_doc(self, text: str, chat_id: str) -> str | None:
+        """If text exceeds threshold, create a Feishu doc and return link.
+
+        Returns the replacement text (with doc link), or None to keep original.
+        """
+        if not self._feishu_api or len(text) < LONG_CONTENT_THRESHOLD:
+            return None
+
+        try:
+            # Extract title from first heading or first line
+            lines = text.strip().split("\n")
+            title = "长内容回复"
+            for line in lines:
+                stripped = line.strip().lstrip("#").strip()
+                if stripped:
+                    title = stripped[:50]
+                    break
+
+            doc = await self._feishu_api.create_document(title)
+            if "error" in doc:
+                return None
+
+            doc_id = doc["document_id"]
+            doc_url = doc.get("url", f"https://feishu.cn/docx/{doc_id}")
+            await self._feishu_api.append_document(doc_id, text)
+
+            return (
+                f"{{{{card:header={title},color=blue}}}}\n"
+                f"内容较长，已自动转为文档：[📄 {title}]({doc_url})"
+            )
+        except Exception as e:
+            log.warning("Long content → doc conversion failed: %s", e)
+            return None
 
     # ── Housekeeping ──────────────────────────────────────────────
 

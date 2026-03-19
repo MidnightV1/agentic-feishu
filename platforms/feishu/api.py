@@ -12,6 +12,8 @@ import logging
 import time
 from typing import Any
 
+import httpx
+
 log = logging.getLogger("agentic.feishu.api")
 
 
@@ -38,6 +40,7 @@ class FeishuAPI:
             .domain(lark_domain)
             .build()
         )
+        self._token_cache: dict[str, Any] = {"token": "", "expires": 0}
         log.info("Feishu API client started")
 
     async def stop(self) -> None:
@@ -299,5 +302,185 @@ class FeishuAPI:
                 "event_id": resp.data.event.event_id,
                 "summary": summary,
             }
+        except Exception as e:
+            return {"error": str(e)}
+
+    # ── Media download ─────────────────────────────────────────────
+
+    async def _get_tenant_token(self) -> str:
+        """Get or refresh tenant access token."""
+        now = time.time()
+        if self._token_cache["token"] and self._token_cache["expires"] > now:
+            return self._token_cache["token"]
+
+        async with httpx.AsyncClient() as http:
+            resp = await http.post(
+                f"{self.domain}/open-apis/auth/v3/tenant_access_token/internal",
+                json={"app_id": self.app_id, "app_secret": self.app_secret},
+            )
+            data = resp.json()
+            token = data.get("tenant_access_token", "")
+            expire = data.get("expire", 7200)
+            self._token_cache = {"token": token, "expires": now + expire - 300}
+            return token
+
+    async def download_resource(
+        self, message_id: str, file_key: str, resource_type: str = "image"
+    ) -> bytes | None:
+        """Download an image or file from a Feishu message.
+
+        Args:
+            message_id: The message containing the resource
+            file_key: The image_key or file_key
+            resource_type: "image" or "file"
+
+        Returns: raw bytes or None on failure.
+        """
+        token = await self._get_tenant_token()
+        url = (
+            f"{self.domain}/open-apis/im/v1/messages/{message_id}"
+            f"/resources/{file_key}?type={resource_type}"
+        )
+        try:
+            async with httpx.AsyncClient() as http:
+                resp = await http.get(
+                    url,
+                    headers={"Authorization": f"Bearer {token}"},
+                    timeout=60,
+                )
+                if resp.status_code == 200 and resp.headers.get("content-type", "").startswith(
+                    ("image/", "application/", "audio/", "video/")
+                ):
+                    return resp.content
+                log.warning(
+                    "Download resource failed: status=%s type=%s",
+                    resp.status_code,
+                    resp.headers.get("content-type"),
+                )
+                return None
+        except Exception as e:
+            log.warning("Download resource error: %s", e)
+            return None
+
+    # ── Bitable ────────────────────────────────────────────────────
+
+    async def list_bitable_tables(self, app_token: str) -> list:
+        """List all tables in a Bitable app."""
+        token = await self._get_tenant_token()
+        url = f"{self.domain}/open-apis/bitable/v1/apps/{app_token}/tables"
+        try:
+            async with httpx.AsyncClient() as http:
+                resp = await http.get(
+                    url, headers={"Authorization": f"Bearer {token}"}, timeout=30,
+                )
+                data = resp.json()
+                if data.get("code") != 0:
+                    return [{"error": f"{data.get('code')}: {data.get('msg')}"}]
+                items = data.get("data", {}).get("items", [])
+                return [
+                    {"table_id": t["table_id"], "name": t.get("name", "")}
+                    for t in items
+                ]
+        except Exception as e:
+            return [{"error": str(e)}]
+
+    async def query_bitable_records(
+        self,
+        app_token: str,
+        table_id: str,
+        filter_expr: str = "",
+        page_size: int = 20,
+    ) -> list:
+        """Query records from a Bitable table."""
+        token = await self._get_tenant_token()
+        url = (
+            f"{self.domain}/open-apis/bitable/v1/apps/{app_token}"
+            f"/tables/{table_id}/records/search"
+        )
+        body: dict[str, Any] = {"page_size": min(page_size, 100)}
+        if filter_expr:
+            body["filter"] = {"conjunction": "and", "conditions": []}
+            # Pass raw filter string — caller formats it
+            body["filter"] = filter_expr
+        try:
+            async with httpx.AsyncClient() as http:
+                resp = await http.post(
+                    url, headers={"Authorization": f"Bearer {token}"},
+                    json=body, timeout=30,
+                )
+                data = resp.json()
+                if data.get("code") != 0:
+                    return [{"error": f"{data.get('code')}: {data.get('msg')}"}]
+                items = data.get("data", {}).get("items", [])
+                return [
+                    {"record_id": r["record_id"], "fields": r.get("fields", {})}
+                    for r in items
+                ]
+        except Exception as e:
+            return [{"error": str(e)}]
+
+    async def add_bitable_record(
+        self, app_token: str, table_id: str, fields: dict
+    ) -> dict:
+        """Add a record to a Bitable table."""
+        token = await self._get_tenant_token()
+        url = (
+            f"{self.domain}/open-apis/bitable/v1/apps/{app_token}"
+            f"/tables/{table_id}/records"
+        )
+        try:
+            async with httpx.AsyncClient() as http:
+                resp = await http.post(
+                    url, headers={"Authorization": f"Bearer {token}"},
+                    json={"fields": fields}, timeout=30,
+                )
+                data = resp.json()
+                if data.get("code") != 0:
+                    return {"error": f"{data.get('code')}: {data.get('msg')}"}
+                record = data.get("data", {}).get("record", {})
+                return {"record_id": record.get("record_id", ""), "ok": True}
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def update_bitable_record(
+        self, app_token: str, table_id: str, record_id: str, fields: dict
+    ) -> dict:
+        """Update a Bitable record."""
+        token = await self._get_tenant_token()
+        url = (
+            f"{self.domain}/open-apis/bitable/v1/apps/{app_token}"
+            f"/tables/{table_id}/records/{record_id}"
+        )
+        try:
+            async with httpx.AsyncClient() as http:
+                resp = await http.put(
+                    url, headers={"Authorization": f"Bearer {token}"},
+                    json={"fields": fields}, timeout=30,
+                )
+                data = resp.json()
+                if data.get("code") != 0:
+                    return {"error": f"{data.get('code')}: {data.get('msg')}"}
+                return {"record_id": record_id, "ok": True}
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def delete_bitable_record(
+        self, app_token: str, table_id: str, record_id: str
+    ) -> dict:
+        """Delete a Bitable record."""
+        token = await self._get_tenant_token()
+        url = (
+            f"{self.domain}/open-apis/bitable/v1/apps/{app_token}"
+            f"/tables/{table_id}/records/{record_id}"
+        )
+        try:
+            async with httpx.AsyncClient() as http:
+                resp = await http.delete(
+                    url, headers={"Authorization": f"Bearer {token}"}, timeout=30,
+                )
+                data = resp.json()
+                if data.get("code") != 0:
+                    return {"error": f"{data.get('code')}: {data.get('msg')}"}
+                return {"record_id": record_id, "deleted": True}
         except Exception as e:
             return {"error": str(e)}

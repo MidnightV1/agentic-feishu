@@ -76,6 +76,9 @@ class FeishuAPI:
 
     async def stop(self) -> None:
         self._client = None
+        if hasattr(self, "_http") and self._http:
+            await self._http.aclose()
+            self._http = None
 
     def _ensure_client(self) -> Any:
         if self._client is None:
@@ -144,9 +147,10 @@ class FeishuAPI:
         token = await self._get_tenant_token()
         url = f"{self.domain}{path}"
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-        async with httpx.AsyncClient() as http:
-            resp = await http.request(method, url, json=body, params=params, headers=headers)
-            return resp.json()
+        if not hasattr(self, "_http") or self._http is None:
+            self._http = httpx.AsyncClient(timeout=30)
+        resp = await self._http.request(method, url, json=body, params=params, headers=headers)
+        return resp.json()
 
     async def append_document(self, document_id: str, content: str) -> dict:
         """Append markdown content to a document, with native table support."""
@@ -211,7 +215,14 @@ class FeishuAPI:
         return {"ok": True, "blocks_added": total}
 
     async def _create_table_in_doc(self, doc_id: str, rows: list[list[str]]) -> str | None:
-        """Create a native table in a Feishu document (two-step: create → fill)."""
+        """Create a native table in a Feishu document.
+
+        Optimized 3-step flow (vs old N×M per-cell approach):
+        1. Create empty table → 1 POST → get cell_ids
+        2. Concurrent GET cell children → find text_block_ids (rate-limited)
+        3. batch_update all cells → 1 PATCH (up to 200 ops)
+        """
+        import asyncio
         from platforms.feishu.blocks import _parse_inline
 
         row_count = len(rows)
@@ -243,7 +254,6 @@ class FeishuAPI:
                       resp.get("msg"), row_count, col_count, doc_id)
             return None
 
-        # Extract cell block_ids
         table_block = resp["data"]["children"][0]
         cell_ids = table_block.get("table", {}).get("cells", [])
         table_bid = table_block.get("block_id")
@@ -252,56 +262,73 @@ class FeishuAPI:
                         row_count * col_count, len(cell_ids))
             return table_bid
 
-        # Step 2: Fill cells
+        # Step 2: Concurrent GET to find text_block_id inside each cell
+        # Rate limit: semaphore caps concurrent requests (Feishu: 3 req/s/app)
+        sem = asyncio.Semaphore(3)
+
+        async def _get_text_block_id(cell_id: str) -> str | None:
+            async with sem:
+                child_resp = await self._raw_request(
+                    "GET",
+                    f"/open-apis/docx/v1/documents/{doc_id}/blocks/{cell_id}/children",
+                    params={"document_revision_id": "-1"},
+                )
+                items = child_resp.get("data", {}).get("items", [])
+                if items:
+                    return items[0]["block_id"]
+                return None
+
+        text_block_ids = await asyncio.gather(
+            *[_get_text_block_id(cid) for cid in cell_ids]
+        )
+
+        # Step 3: batch_update — write all cells in one PATCH
+        # Build update requests: {block_id: {update_text_elements: {elements: [...]}}}
+        update_requests = []
         idx = 0
         for ri, row in enumerate(rows):
             for ci, cell_text in enumerate(row):
-                cell_id = cell_ids[idx]
+                tb_id = text_block_ids[idx]
                 idx += 1
-                try:
-                    # Get the auto-generated text block in the cell
-                    child_resp = await self._raw_request(
-                        "GET",
-                        f"/open-apis/docx/v1/documents/{doc_id}/blocks/{cell_id}/children",
-                        params={"document_revision_id": "-1"},
-                    )
-                    items = child_resp.get("data", {}).get("items", [])
-                    if items:
-                        text_block_id = items[0]["block_id"]
-                    else:
-                        # Create text block in cell
-                        cr = await self._raw_request(
-                            "POST",
-                            f"/open-apis/docx/v1/documents/{doc_id}/blocks/{cell_id}/children",
-                            body={"children": [{"block_type": 2, "text": {"elements": [
-                                {"text_run": {"content": ""}}
-                            ]}}]},
+                if not tb_id:
+                    continue
+
+                if ri == 0:  # header row = bold
+                    elements = [{"text_run": {
+                        "content": cell_text,
+                        "text_element_style": {"bold": True},
+                    }}]
+                else:
+                    elements = _parse_inline(cell_text) if cell_text else [
+                        {"text_run": {"content": ""}}
+                    ]
+
+                update_requests.append({
+                    "block_id": tb_id,
+                    "update_text_elements": {"elements": elements},
+                })
+
+        if update_requests:
+            # batch_update supports up to 200 operations
+            for i in range(0, len(update_requests), 200):
+                batch = update_requests[i:i + 200]
+                batch_resp = await self._raw_request(
+                    "PATCH",
+                    f"/open-apis/docx/v1/documents/{doc_id}/blocks/batch_update",
+                    body={"requests": batch},
+                    params={"document_revision_id": "-1"},
+                )
+                if batch_resp.get("code") != 0:
+                    log.warning("batch_update failed: %s | doc=%s, falling back to sequential",
+                                batch_resp.get("msg"), doc_id)
+                    # Fallback: sequential PATCH per cell
+                    for req in batch:
+                        await self._raw_request(
+                            "PATCH",
+                            f"/open-apis/docx/v1/documents/{doc_id}/blocks/{req['block_id']}",
+                            body={"update_text_elements": req["update_text_elements"]},
                             params={"document_revision_id": "-1"},
                         )
-                        created = cr.get("data", {}).get("children", [])
-                        if not created:
-                            continue
-                        text_block_id = created[0]["block_id"]
-
-                    # Header row = bold, others = inline-parsed
-                    if ri == 0:
-                        elements = [{"text_run": {
-                            "content": cell_text,
-                            "text_element_style": {"bold": True},
-                        }}]
-                    else:
-                        elements = _parse_inline(cell_text) if cell_text else [
-                            {"text_run": {"content": ""}}
-                        ]
-
-                    await self._raw_request(
-                        "PATCH",
-                        f"/open-apis/docx/v1/documents/{doc_id}/blocks/{text_block_id}",
-                        body={"update_text_elements": {"elements": elements}},
-                        params={"document_revision_id": "-1"},
-                    )
-                except Exception as e:
-                    log.warning("Fill cell [%d,%d] failed: %s", ri, ci, e)
 
         return table_bid
 

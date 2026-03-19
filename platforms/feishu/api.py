@@ -7,6 +7,7 @@ All methods are async and return dicts/lists.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -140,17 +141,47 @@ class FeishuAPI:
             }
             return token
 
+    _TRANSIENT_CODES = {99991663, 99991664, 99991661, 99991668}
+
     async def _raw_request(self, method: str, path: str,
                            body: dict | None = None,
                            params: dict | None = None) -> dict:
-        """Make raw HTTP request to Feishu API with tenant_access_token."""
-        token = await self._get_tenant_token()
+        """Make raw HTTP request to Feishu API with tenant_access_token.
+
+        Retries up to 2 times on network errors or token-expiry codes.
+        """
         url = f"{self.domain}{path}"
-        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
         if not hasattr(self, "_http") or self._http is None:
             self._http = httpx.AsyncClient(timeout=30)
-        resp = await self._http.request(method, url, json=body, params=params, headers=headers)
-        return resp.json()
+
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            token = await self._get_tenant_token()
+            headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+            try:
+                resp = await self._http.request(method, url, json=body, params=params, headers=headers)
+                data = resp.json()
+            except httpx.HTTPError as exc:
+                last_exc = exc
+                if attempt < 2:
+                    log.warning("_raw_request network error (attempt %d): %s", attempt + 1, exc)
+                    await asyncio.sleep(1 << attempt)  # 1s, 2s
+                    continue
+                raise
+
+            code = data.get("code")
+            if code in self._TRANSIENT_CODES:
+                log.warning("_raw_request token-expiry code %s (attempt %d), refreshing", code, attempt + 1)
+                self._token_cache = {"token": "", "expires": 0}
+                if attempt < 2:
+                    await asyncio.sleep(1 << attempt)
+                    continue
+            return data
+
+        # Should not reach here, but just in case
+        if last_exc:
+            raise last_exc
+        return data  # type: ignore[possibly-undefined]
 
     async def append_document(self, document_id: str, content: str) -> dict:
         """Append markdown content to a document, with native table support."""
@@ -469,29 +500,99 @@ class FeishuAPI:
         except Exception as e:
             return [{"error": f"Cannot get tasklist: {e}"}]
 
-        req = (
-            TasksTasklistRequest.builder()
-            .tasklist_guid(tasklist_guid)
-            .completed("true" if completed else "false")
-            .page_size(50)
-            .build()
-        )
-        resp = await client.task.v2.tasklist.atasks(req)
+        result = []
+        page_token = ""
+        while True:
+            builder = (
+                TasksTasklistRequest.builder()
+                .tasklist_guid(tasklist_guid)
+                .completed("true" if completed else "false")
+                .page_size(50)
+            )
+            if page_token:
+                builder = builder.page_token(page_token)
+            req = builder.build()
+            resp = await client.task.v2.tasklist.atasks(req)
+
+            if not resp.success():
+                log.error("list_tasks failed: %s %s", resp.code, resp.msg)
+                if not result:
+                    return [{"error": f"{resp.code}: {resp.msg}"}]
+                break
+
+            tasks = resp.data.items or []
+            for t in tasks:
+                is_done = bool(getattr(t, "completed_at", None))
+                result.append({
+                    "task_id": t.guid,
+                    "summary": t.summary,
+                    "completed": is_done,
+                })
+
+            page_token = getattr(resp.data, "page_token", "") or ""
+            if not page_token:
+                break
+        return result
+
+    async def get_task(self, task_id: str) -> dict:
+        """Get a single task by ID."""
+        client = self._ensure_client()
+        from lark_oapi.api.task.v2 import GetTaskRequest
+
+        req = GetTaskRequest.builder().task_guid(task_id).build()
+        resp = await client.task.v2.task.aget(req)
 
         if not resp.success():
-            log.error("list_tasks failed: %s %s", resp.code, resp.msg)
-            return [{"error": f"{resp.code}: {resp.msg}"}]
+            return {"error": f"{resp.code}: {resp.msg}"}
 
-        tasks = resp.data.items or []
-        result = []
-        for t in tasks:
-            is_done = bool(getattr(t, "completed_at", None))
-            result.append({
-                "task_id": t.guid,
-                "summary": t.summary,
-                "completed": is_done,
-            })
-        return result
+        t = resp.data.task
+        return {
+            "task_id": t.guid,
+            "summary": t.summary,
+            "description": getattr(t, "description", "") or "",
+            "completed": bool(getattr(t, "completed_at", None)),
+            "due": getattr(getattr(t, "due", None), "timestamp", "") if getattr(t, "due", None) else "",
+        }
+
+    async def update_task(
+        self, task_id: str, title: str = "", due_date: str = "", description: str = ""
+    ) -> dict:
+        """Update a task. Only non-empty fields are updated."""
+        client = self._ensure_client()
+        from lark_oapi.api.task.v2 import PatchTaskRequest, Task, Due
+
+        task_builder = Task.builder()
+        if title:
+            task_builder = task_builder.summary(title)
+        if description:
+            task_builder = task_builder.description(description)
+        if due_date:
+            due = Due.builder().timestamp(_to_timestamp(due_date)).is_all_day(True).build()
+            task_builder = task_builder.due(due)
+
+        req = (
+            PatchTaskRequest.builder()
+            .task_guid(task_id)
+            .request_body(task_builder.build())
+            .build()
+        )
+        resp = await client.task.v2.task.apatch(req)
+
+        if not resp.success():
+            return {"error": f"{resp.code}: {resp.msg}"}
+        return {"ok": True, "task_id": task_id}
+
+    async def delete_task(self, task_id: str) -> dict:
+        """Delete a task."""
+        client = self._ensure_client()
+        from lark_oapi.api.task.v2 import DeleteTaskRequest
+
+        req = DeleteTaskRequest.builder().task_guid(task_id).build()
+        resp = await client.task.v2.task.adelete(req)
+
+        if not resp.success():
+            return {"error": f"{resp.code}: {resp.msg}"}
+        return {"ok": True, "task_id": task_id}
 
     async def complete_task(self, task_id: str) -> dict:
         client = self._ensure_client()
@@ -603,6 +704,7 @@ class FeishuAPI:
         start_time: str,
         end_time: str,
         description: str = "",
+        attendees: list[str] | None = None,
     ) -> dict:
         client = self._ensure_client()
         from lark_oapi.api.calendar.v4 import (
@@ -631,31 +733,120 @@ class FeishuAPI:
             if not resp.success():
                 log.error("create_event failed: %s %s", resp.code, resp.msg)
                 return {"error": f"{resp.code}: {resp.msg}"}
-            return {
-                "event_id": resp.data.event.event_id,
-                "summary": summary,
-            }
+
+            event_id = resp.data.event.event_id
+            result: dict[str, Any] = {"event_id": event_id, "summary": summary}
+
+            # Add attendees if provided
+            if attendees:
+                from lark_oapi.api.calendar.v4 import (
+                    CreateCalendarEventAttendeeRequest,
+                    CreateCalendarEventAttendeeRequestBody,
+                    CalendarEventAttendee,
+                )
+                attendee_list = [
+                    CalendarEventAttendee.builder()
+                    .type("user")
+                    .user_id(uid)
+                    .build()
+                    for uid in attendees
+                ]
+                att_req = (
+                    CreateCalendarEventAttendeeRequest.builder()
+                    .calendar_id(cal_id)
+                    .event_id(event_id)
+                    .request_body(
+                        CreateCalendarEventAttendeeRequestBody.builder()
+                        .attendees(attendee_list)
+                        .user_id_type("open_id")
+                        .build()
+                    )
+                    .build()
+                )
+                att_resp = await client.calendar.v4.calendar_event_attendee.acreate(att_req)
+                if not att_resp.success():
+                    log.warning("add_attendees failed: %s %s", att_resp.code, att_resp.msg)
+                    result["attendees_error"] = f"{att_resp.code}: {att_resp.msg}"
+                else:
+                    result["attendees_added"] = len(attendees)
+
+            return result
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def update_event(
+        self,
+        event_id: str,
+        summary: str = "",
+        start_time: str = "",
+        end_time: str = "",
+        description: str = "",
+    ) -> dict:
+        """Update a calendar event. Only non-empty fields are updated."""
+        client = self._ensure_client()
+        from lark_oapi.api.calendar.v4 import (
+            PatchCalendarEventRequest,
+            CalendarEvent,
+            TimeInfo,
+        )
+
+        cal_id = await self._get_primary_calendar_id()
+
+        event_builder = CalendarEvent.builder()
+        if summary:
+            event_builder = event_builder.summary(summary)
+        if start_time:
+            event_builder = event_builder.start_time(
+                TimeInfo.builder().timestamp(_to_timestamp(start_time)).build()
+            )
+        if end_time:
+            event_builder = event_builder.end_time(
+                TimeInfo.builder().timestamp(_to_timestamp(end_time)).build()
+            )
+        if description:
+            event_builder = event_builder.description(description)
+
+        req = (
+            PatchCalendarEventRequest.builder()
+            .calendar_id(cal_id)
+            .event_id(event_id)
+            .request_body(event_builder.build())
+            .build()
+        )
+
+        try:
+            resp = await client.calendar.v4.calendar_event.apatch(req)
+            if not resp.success():
+                log.error("update_event failed: %s %s", resp.code, resp.msg)
+                return {"error": f"{resp.code}: {resp.msg}"}
+            return {"ok": True, "event_id": event_id}
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def delete_event(self, event_id: str) -> dict:
+        """Delete a calendar event."""
+        client = self._ensure_client()
+        from lark_oapi.api.calendar.v4 import DeleteCalendarEventRequest
+
+        cal_id = await self._get_primary_calendar_id()
+
+        req = (
+            DeleteCalendarEventRequest.builder()
+            .calendar_id(cal_id)
+            .event_id(event_id)
+            .build()
+        )
+
+        try:
+            resp = await client.calendar.v4.calendar_event.adelete(req)
+            if not resp.success():
+                log.error("delete_event failed: %s %s", resp.code, resp.msg)
+                return {"error": f"{resp.code}: {resp.msg}"}
+            return {"ok": True, "event_id": event_id}
         except Exception as e:
             return {"error": str(e)}
 
     # ── Media download ─────────────────────────────────────────────
-
-    async def _get_tenant_token(self) -> str:
-        """Get or refresh tenant access token."""
-        now = time.time()
-        if self._token_cache["token"] and self._token_cache["expires"] > now:
-            return self._token_cache["token"]
-
-        async with httpx.AsyncClient() as http:
-            resp = await http.post(
-                f"{self.domain}/open-apis/auth/v3/tenant_access_token/internal",
-                json={"app_id": self.app_id, "app_secret": self.app_secret},
-            )
-            data = resp.json()
-            token = data.get("tenant_access_token", "")
-            expire = data.get("expire", 7200)
-            self._token_cache = {"token": token, "expires": now + expire - 300}
-            return token
 
     async def download_resource(
         self, message_id: str, file_key: str, resource_type: str = "image"

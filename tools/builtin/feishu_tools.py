@@ -85,6 +85,70 @@ async def search_documents(query: str, count: int = 10) -> list:
     return results
 
 
+@tool(description="List comments on a Feishu document", parallel_safe=True)
+async def list_comments(document_id: str) -> list:
+    """List comments on a Feishu document.
+
+    Args:
+        document_id: The document ID
+    """
+    api = _require_api()
+    result = await api.list_comments(document_id)
+    return result
+
+
+@tool(description="Reply to a comment on a Feishu document", parallel_safe=False)
+async def reply_comment(document_id: str, comment_id: str, content: str) -> dict:
+    """Reply to a comment on a Feishu document.
+
+    Args:
+        document_id: The document ID
+        comment_id: The comment ID to reply to
+        content: Reply text content
+    """
+    api = _require_api()
+    result = await api.reply_comment(document_id, comment_id, content)
+    return result
+
+
+@tool(description="Update a Feishu document (replace all content)", parallel_safe=False)
+async def update_document(document_id: str, content: str) -> dict:
+    """Update a Feishu document by replacing all content.
+
+    Args:
+        document_id: The document ID
+        content: New markdown content
+    """
+    api = _require_api()
+    result = await api.update_document(document_id, content)
+    return result
+
+
+@tool(description="Transfer ownership of a Feishu document", parallel_safe=False)
+async def transfer_document_owner(document_id: str, new_owner_id: str) -> dict:
+    """Transfer ownership of a Feishu document.
+
+    Args:
+        document_id: The document ID
+        new_owner_id: The new owner's user ID (open_id)
+    """
+    api = _require_api()
+    result = await api.transfer_document_owner(document_id, new_owner_id)
+    return result
+
+
+@tool(description="List files in a Feishu Drive folder", parallel_safe=True)
+async def list_folder(folder_token: str = "") -> list:
+    """List files in a Feishu Drive folder.
+
+    Args:
+        folder_token: Folder token (empty for root)
+    """
+    api = _require_api()
+    result = await api.list_drive_files(folder_token=folder_token)
+    return result
+
+
 # ── Task tools ────────────────────────────────────────────────────
 
 
@@ -123,6 +187,49 @@ async def complete_task(task_id: str) -> dict:
     """
     api = _require_api()
     result = await api.complete_task(task_id)
+    return result
+
+
+@tool(description="Get details of a Feishu task", parallel_safe=True)
+async def get_task(task_id: str) -> dict:
+    """Get details of a Feishu task.
+
+    Args:
+        task_id: The task GUID
+    """
+    api = _require_api()
+    result = await api.get_task(task_id)
+    return result
+
+
+@tool(description="Update a Feishu task", parallel_safe=False)
+async def update_task(
+    task_id: str, title: str = "", due_date: str = "", description: str = ""
+) -> dict:
+    """Update a Feishu task.
+
+    Args:
+        task_id: The task GUID
+        title: New title (empty to keep current)
+        due_date: New due date in ISO format (empty to keep current)
+        description: New description (empty to keep current)
+    """
+    api = _require_api()
+    result = await api.update_task(
+        task_id=task_id, title=title, due_date=due_date, description=description
+    )
+    return result
+
+
+@tool(description="Delete a Feishu task", parallel_safe=False)
+async def delete_task(task_id: str) -> dict:
+    """Delete a Feishu task.
+
+    Args:
+        task_id: The task GUID
+    """
+    api = _require_api()
+    result = await api.delete_task(task_id)
     return result
 
 
@@ -179,4 +286,44 @@ async def create_event(
         end_time=end_time,
         description=description,
     )
+    return result
+
+
+@tool(description="Update a Feishu calendar event", parallel_safe=False)
+async def update_event(
+    event_id: str,
+    summary: str = "",
+    start_time: str = "",
+    end_time: str = "",
+    description: str = "",
+) -> dict:
+    """Update a calendar event.
+
+    Args:
+        event_id: The event ID to update
+        summary: New event title (empty to keep current)
+        start_time: New start time in ISO format (empty to keep current)
+        end_time: New end time in ISO format (empty to keep current)
+        description: New description (empty to keep current)
+    """
+    api = _require_api()
+    result = await api.update_event(
+        event_id=event_id,
+        summary=summary,
+        start_time=start_time,
+        end_time=end_time,
+        description=description,
+    )
+    return result
+
+
+@tool(description="Delete a Feishu calendar event", parallel_safe=False)
+async def delete_event(event_id: str) -> dict:
+    """Delete a calendar event.
+
+    Args:
+        event_id: The event ID to delete
+    """
+    api = _require_api()
+    result = await api.delete_event(event_id=event_id)
     return result

@@ -12,6 +12,24 @@ log = logging.getLogger("agentic.feishu.dispatcher")
 
 MAX_CHUNK_LEN = 4000  # Feishu card markdown limit per element
 
+# URL enhancement: convert markdown links to <link> tags for better card rendering
+_FEISHU_DOC_URL_RE = re.compile(
+    r"https?://(?:[\w-]+\.)?(?:feishu\.cn|larksuite\.com)"
+    r"/(?:docx|docs|wiki|sheets|base|bitable|drive|minutes)/\w+"
+)
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)]+)\)")
+
+
+def _enhance_urls(markdown: str) -> str:
+    """Convert markdown [text](url) links to Feishu <link> tags for richer rendering."""
+    def _replace(m: re.Match) -> str:
+        text, url = m.group(1), m.group(2)
+        if _FEISHU_DOC_URL_RE.match(url):
+            return f"<link icon='file_link_docx_outlined' url='{url}'>{text}</link>"
+        return f"<link icon='link_outlined' url='{url}'>{text}</link>"
+    return _MD_LINK_RE.sub(_replace, markdown)
+
+
 # Card header directive: {{card:header=标题,color=blue}}
 _CARD_DIRECTIVE_RE = re.compile(
     r"^\s*\{\{card:([^}]+)\}\}\s*\n?", re.IGNORECASE
@@ -48,6 +66,7 @@ def _parse_card_directive(text: str) -> tuple[str, str | None, str | None]:
 
 def _build_card(markdown: str, header: str | None = None, color: str | None = None) -> dict:
     """Build a Feishu interactive card (JSON 2.0) from markdown text."""
+    markdown = _enhance_urls(markdown)
     elements: list[dict] = []
     elements.append({"tag": "markdown", "content": markdown})
 

@@ -35,29 +35,43 @@ def _parse_inline(text: str) -> list[dict]:
     elements: list[dict] = []
     pos = 0
 
-    # Combined pattern for inline formatting
-    combined = re.compile(r"(\*\*(.+?)\*\*|\*(.+?)\*|`(.+?)`)")
+    # Combined pattern for inline formatting: bold, italic, code, links
+    combined = re.compile(
+        r"\*\*(.+?)\*\*"              # bold
+        r"|\*(.+?)\*"                 # italic
+        r"|`(.+?)`"                   # inline code
+        r"|\[([^\]]+)\]\(([^)]+)\)"   # link
+    )
 
     for m in combined.finditer(text):
         # Add plain text before this match
         if m.start() > pos:
             elements.append({"text_run": {"content": text[pos:m.start()]}})
 
-        if m.group(2):  # bold
+        if m.group(1):  # bold
             elements.append({"text_run": {
-                "content": m.group(2),
+                "content": m.group(1),
                 "text_element_style": {"bold": True},
             }})
-        elif m.group(3):  # italic
+        elif m.group(2):  # italic
             elements.append({"text_run": {
-                "content": m.group(3),
+                "content": m.group(2),
                 "text_element_style": {"italic": True},
             }})
-        elif m.group(4):  # inline code
+        elif m.group(3):  # inline code
             elements.append({"text_run": {
-                "content": m.group(4),
+                "content": m.group(3),
                 "text_element_style": {"inline_code": True},
             }})
+        elif m.group(4):  # link
+            url = m.group(5)
+            if url.startswith("http://") or url.startswith("https://"):
+                elements.append({"text_run": {
+                    "content": m.group(4),
+                    "text_element_style": {"link": {"url": url}},
+                }})
+            else:
+                elements.append({"text_run": {"content": m.group(4)}})
         pos = m.end()
 
     # Remaining text

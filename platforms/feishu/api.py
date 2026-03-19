@@ -10,11 +10,42 @@ from __future__ import annotations
 import json
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
 
 log = logging.getLogger("agentic.feishu.api")
+
+
+def _to_timestamp(s: str) -> str:
+    """Convert time string to Unix timestamp string.
+
+    Accepts: Unix timestamp, ISO 8601, or common datetime formats.
+    """
+    s = s.strip()
+    # Already a Unix timestamp
+    if s.isdigit() and len(s) >= 10:
+        return s
+    # Try ISO / common formats
+    for fmt in (
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d",
+    ):
+        try:
+            dt = datetime.strptime(s, fmt)
+            if dt.tzinfo is None:
+                # Assume UTC+8 (China)
+                from datetime import timedelta
+                dt = dt.replace(tzinfo=timezone(offset=timedelta(hours=8)))
+            return str(int(dt.timestamp()))
+        except ValueError:
+            continue
+    # Fallback: return as-is and let API reject it
+    return s
 
 
 class FeishuAPI:
@@ -88,41 +119,59 @@ class FeishuAPI:
         return resp.data.content
 
     async def append_document(self, document_id: str, content: str) -> dict:
-        """Append markdown blocks to a document — simplified version."""
-        # Full block-level append would use docx.v1.document_block
-        # For now, create text blocks from markdown
+        """Append markdown content to a document, converting to native blocks."""
+        from platforms.feishu.blocks import text_to_blocks
+
         client = self._ensure_client()
         from lark_oapi.api.docx.v1 import (
             CreateDocumentBlockChildrenRequest,
             CreateDocumentBlockChildrenRequestBody,
         )
 
-        blocks = [
-            {
-                "block_type": 2,
-                "text": {
-                    "elements": [{"text_run": {"content": content}}],
-                    "style": {},
-                },
-            }
-        ]
+        all_blocks = text_to_blocks(content)
+        if not all_blocks:
+            return {"ok": True, "blocks_added": 0}
 
-        req = (
-            CreateDocumentBlockChildrenRequest.builder()
-            .document_id(document_id)
-            .block_id(document_id)  # root block
-            .request_body(
-                CreateDocumentBlockChildrenRequestBody.builder()
-                .children(blocks)
+        # Filter out table markers (degrade to pipe-delimited text)
+        blocks = []
+        for b in all_blocks:
+            if "_table" in b:
+                # Degrade: table → plain text rows
+                rows = b["_table"]
+                for row in rows:
+                    line = "| " + " | ".join(row) + " |"
+                    blocks.append({
+                        "block_type": 2,
+                        "text": {"elements": [{"text_run": {"content": line}}]},
+                    })
+            else:
+                blocks.append(b)
+
+        # Flush in batches (Feishu API limit ~50 blocks per request)
+        BATCH_SIZE = 50
+        total = 0
+        for i in range(0, len(blocks), BATCH_SIZE):
+            chunk = blocks[i:i + BATCH_SIZE]
+            req = (
+                CreateDocumentBlockChildrenRequest.builder()
+                .document_id(document_id)
+                .block_id(document_id)  # root block
+                .request_body(
+                    CreateDocumentBlockChildrenRequestBody.builder()
+                    .children(chunk)
+                    .build()
+                )
                 .build()
             )
-            .build()
-        )
-        resp = await client.docx.v1.document_block_children.acreate(req)
+            resp = await client.docx.v1.document_block_children.acreate(req)
+            if not resp.success():
+                log.error("append_document batch failed: %s %s", resp.code, resp.msg)
+                if total == 0:
+                    return {"error": f"{resp.code}: {resp.msg}"}
+                break
+            total += len(chunk)
 
-        if not resp.success():
-            return {"error": f"{resp.code}: {resp.msg}"}
-        return {"ok": True, "blocks_added": len(blocks)}
+        return {"ok": True, "blocks_added": total}
 
     async def search_documents(self, query: str, count: int = 10) -> list:
         client = self._ensure_client()
@@ -153,43 +202,131 @@ class FeishuAPI:
 
     # ── Tasks ─────────────────────────────────────────────────────
 
+    _tasklist_guid: str | None = None
+
+    async def _ensure_tasklist_guid(self) -> str:
+        """Get or create the dedicated bot tasklist (cached after first call).
+
+        Uses GET tasklists to find an existing "Bot Tasks" list before creating.
+        Tasklist-scoped queries support tenant_access_token, unlike the global
+        task list endpoint which requires user_access_token.
+        """
+        if self._tasklist_guid:
+            return self._tasklist_guid
+
+        client = self._ensure_client()
+        from lark_oapi.api.task.v2 import (
+            ListTasklistRequest,
+            CreateTasklistRequest,
+            InputTasklist,
+        )
+
+        # First, look for an existing "Bot Tasks" tasklist
+        try:
+            req = ListTasklistRequest.builder().page_size(50).build()
+            resp = await client.task.v2.tasklist.alist(req)
+            if resp.success() and resp.data and resp.data.items:
+                for tl in resp.data.items:
+                    if getattr(tl, "name", "") == "Bot Tasks":
+                        self._tasklist_guid = tl.guid
+                        log.info("Found existing tasklist: %s", self._tasklist_guid)
+                        return self._tasklist_guid
+        except Exception as e:
+            log.warning("list_tasklists failed: %s", e)
+
+        # Create a new "Bot Tasks" tasklist
+        try:
+            body = InputTasklist.builder().name("Bot Tasks").build()
+            req = CreateTasklistRequest.builder().request_body(body).build()
+            resp = await client.task.v2.tasklist.acreate(req)
+            if not resp.success():
+                raise RuntimeError(f"create_tasklist failed: {resp.code}: {resp.msg}")
+            self._tasklist_guid = resp.data.tasklist.guid
+            log.info("Created new tasklist: %s", self._tasklist_guid)
+            return self._tasklist_guid
+        except Exception as e:
+            log.error("_ensure_tasklist_guid error: %s", e)
+            raise
+
     async def create_task(
         self, title: str, due_date: str = "", description: str = ""
     ) -> dict:
         client = self._ensure_client()
-        from lark_oapi.api.task.v2 import CreateTaskRequest, CreateTaskRequestBody
+        from lark_oapi.api.task.v2 import (
+            CreateTaskRequest,
+            Task,
+            Due,
+            AddTasklistTaskRequest,
+            AddTasklistTaskRequestBody,
+        )
 
-        body_builder = CreateTaskRequestBody.builder().summary(title)
+        task_builder = Task.builder().summary(title)
         if description:
-            body_builder = body_builder.description(description)
+            task_builder = task_builder.description(description)
         if due_date:
-            body_builder = body_builder.due({"timestamp": due_date, "is_all_day": True})
+            due = Due.builder().timestamp(_to_timestamp(due_date)).is_all_day(True).build()
+            task_builder = task_builder.due(due)
 
-        req = CreateTaskRequest.builder().request_body(body_builder.build()).build()
+        req = CreateTaskRequest.builder().request_body(task_builder.build()).build()
         resp = await client.task.v2.task.acreate(req)
 
         if not resp.success():
+            log.error("create_task failed: %s %s", resp.code, resp.msg)
             return {"error": f"{resp.code}: {resp.msg}"}
-        return {
-            "task_id": resp.data.task.guid,
-            "summary": resp.data.task.summary,
-        }
+
+        task_guid = resp.data.task.guid
+        task_summary = resp.data.task.summary
+
+        # Add to the dedicated tasklist so we can list via tenant_access_token
+        try:
+            tasklist_guid = await self._ensure_tasklist_guid()
+            body = (
+                AddTasklistTaskRequestBody.builder()
+                .tasklist_guid(tasklist_guid)
+                .build()
+            )
+            add_req = (
+                AddTasklistTaskRequest.builder()
+                .task_guid(task_guid)
+                .request_body(body)
+                .build()
+            )
+            add_resp = await client.task.v2.task.aadd_tasklist(add_req)
+            if not add_resp.success():
+                log.warning(
+                    "add_task_to_tasklist failed: %s %s", add_resp.code, add_resp.msg
+                )
+        except Exception as e:
+            log.warning("add_task_to_tasklist error: %s", e)
+
+        return {"task_id": task_guid, "summary": task_summary}
 
     async def list_tasks(self, completed: bool = False) -> list:
         client = self._ensure_client()
-        from lark_oapi.api.task.v2 import ListTaskRequest
+        from lark_oapi.api.task.v2 import TasksTasklistRequest
 
-        req = ListTaskRequest.builder().page_size(50).build()
-        resp = await client.task.v2.task.alist(req)
+        try:
+            tasklist_guid = await self._ensure_tasklist_guid()
+        except Exception as e:
+            return [{"error": f"Cannot get tasklist: {e}"}]
+
+        req = (
+            TasksTasklistRequest.builder()
+            .tasklist_guid(tasklist_guid)
+            .completed("true" if completed else "false")
+            .page_size(50)
+            .build()
+        )
+        resp = await client.task.v2.tasklist.atasks(req)
 
         if not resp.success():
+            log.error("list_tasks failed: %s %s", resp.code, resp.msg)
             return [{"error": f"{resp.code}: {resp.msg}"}]
+
         tasks = resp.data.items or []
         result = []
         for t in tasks:
             is_done = bool(getattr(t, "completed_at", None))
-            if is_done and not completed:
-                continue
             result.append({
                 "task_id": t.guid,
                 "summary": t.summary,
@@ -199,10 +336,16 @@ class FeishuAPI:
 
     async def complete_task(self, task_id: str) -> dict:
         client = self._ensure_client()
-        from lark_oapi.api.task.v2 import CompleteTaskRequest
+        from lark_oapi.api.task.v2 import PatchTaskRequest, Task
 
-        req = CompleteTaskRequest.builder().task_guid(task_id).build()
-        resp = await client.task.v2.task.acomplete(req)
+        completed_task = Task.builder().completed_at(str(int(time.time()))).build()
+        req = (
+            PatchTaskRequest.builder()
+            .task_guid(task_id)
+            .request_body(completed_task)
+            .build()
+        )
+        resp = await client.task.v2.task.apatch(req)
 
         if not resp.success():
             return {"error": f"{resp.code}: {resp.msg}"}
@@ -234,16 +377,45 @@ class FeishuAPI:
 
     # ── Calendar ──────────────────────────────────────────────────
 
+    _primary_calendar_id: str | None = None
+
+    async def _get_primary_calendar_id(self) -> str:
+        """Get the bot's primary calendar ID (cached after first call)."""
+        if self._primary_calendar_id:
+            return self._primary_calendar_id
+        client = self._ensure_client()
+        from lark_oapi.api.calendar.v4 import PrimaryCalendarRequest
+        req = PrimaryCalendarRequest.builder().build()
+        try:
+            resp = await client.calendar.v4.calendar.aprimary(req)
+            if resp.success() and resp.data and resp.data.calendars:
+                self._primary_calendar_id = resp.data.calendars[0].calendar.calendar_id
+                return self._primary_calendar_id
+        except Exception:
+            pass
+        # Fallback: list calendars and pick the first one
+        from lark_oapi.api.calendar.v4 import ListCalendarRequest
+        req2 = ListCalendarRequest.builder().build()
+        try:
+            resp2 = await client.calendar.v4.calendar.alist(req2)
+            if resp2.success() and resp2.data and resp2.data.calendar_list:
+                self._primary_calendar_id = resp2.data.calendar_list[0].calendar_id
+                return self._primary_calendar_id
+        except Exception:
+            pass
+        raise RuntimeError("Cannot determine primary calendar ID")
+
     async def list_events(self, days: int = 7) -> list:
         client = self._ensure_client()
         from lark_oapi.api.calendar.v4 import ListCalendarEventRequest
 
+        cal_id = await self._get_primary_calendar_id()
         now = int(time.time())
         end = now + days * 86400
 
         req = (
             ListCalendarEventRequest.builder()
-            .calendar_id("primary")
+            .calendar_id(cal_id)
             .start_time(str(now))
             .end_time(str(end))
             .build()
@@ -276,27 +448,29 @@ class FeishuAPI:
         client = self._ensure_client()
         from lark_oapi.api.calendar.v4 import (
             CreateCalendarEventRequest,
-            CreateCalendarEventRequestBody,
+            CalendarEvent,
+            TimeInfo,
         )
 
-        body = {
-            "summary": summary,
-            "start_time": {"timestamp": start_time},
-            "end_time": {"timestamp": end_time},
-        }
+        cal_id = await self._get_primary_calendar_id()
+
+        event_builder = CalendarEvent.builder().summary(summary)
+        event_builder.start_time(TimeInfo.builder().timestamp(_to_timestamp(start_time)).build())
+        event_builder.end_time(TimeInfo.builder().timestamp(_to_timestamp(end_time)).build())
         if description:
-            body["description"] = description
+            event_builder.description(description)
 
         req = (
             CreateCalendarEventRequest.builder()
-            .calendar_id("primary")
-            .request_body(body)
+            .calendar_id(cal_id)
+            .request_body(event_builder.build())
             .build()
         )
 
         try:
             resp = await client.calendar.v4.calendar_event.acreate(req)
             if not resp.success():
+                log.error("create_event failed: %s %s", resp.code, resp.msg)
                 return {"error": f"{resp.code}: {resp.msg}"}
             return {
                 "event_id": resp.data.event.event_id,

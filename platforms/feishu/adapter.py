@@ -249,11 +249,11 @@ class FeishuAdapter:
 
     # ── Event handling ────────────────────────────────────────────
 
-    def _on_message_event(self, ctx: Any, event: Any) -> None:
-        """Lark SDK event callback — dispatched on SDK's thread."""
+    def _on_message_event(self, data: Any) -> None:
+        """Lark SDK P2 event callback — dispatched on SDK's thread."""
         try:
-            msg = event.event.message
-            sender = event.event.sender
+            msg = data.event.message
+            sender = data.event.sender
             message_id = msg.message_id
             chat_id = msg.chat_id
             chat_type = msg.chat_type

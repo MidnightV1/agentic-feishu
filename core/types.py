@@ -48,6 +48,7 @@ class Message:
     tool_calls: list[ToolCall] | None = None
     tool_call_id: str | None = None
     name: str | None = None
+    reasoning_content: str | None = None  # DeepSeek Reasoner thinking output
 
     @property
     def text(self) -> str:

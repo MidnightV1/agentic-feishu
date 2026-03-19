@@ -137,8 +137,14 @@ async def main() -> None:
     # ── System prompt (assembled from components) ────────────────
     persona_text = _load_persona(settings.persona)
     skill_descriptions = skill_registry.build_descriptions()
+
+    # Tool usage guidelines
+    guidelines_path = Path(__file__).parent / "templates" / "tool_guidelines.md"
+    tool_guidelines = guidelines_path.read_text(encoding="utf-8") if guidelines_path.exists() else ""
+
     components = [
         ContextComponent(type="platform_rules", content=FEISHU_SYSTEM_PROMPT, priority=90),
+        ContextComponent(type="tool_guidelines", content=tool_guidelines, priority=80),
         ContextComponent(type="persona", content=persona_text, priority=50),
     ]
     if skill_descriptions:

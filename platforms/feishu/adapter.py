@@ -628,11 +628,7 @@ class FeishuAdapter:
 
             async def on_tool_start(name: str, arguments=None) -> None:
                 last_activity[0] = time.monotonic()
-                # Entering tool phase: reset streaming state for this round
-                if not in_tool_phase[0]:
-                    in_tool_phase[0] = True
-                    tool_trace.clear()
-                    stream_buf.clear()
+                in_tool_phase[0] = True
                 label = _make_tool_label(name, arguments if isinstance(arguments, dict) else None)
                 tool_trace.append(label)
                 if thinking_id:
@@ -652,11 +648,18 @@ class FeishuAdapter:
                         thinking_id, "\n".join(tool_trace)
                     )
 
+            async def on_turn_start(turn: int = 0) -> None:
+                """Reset state at the start of each LLM call."""
+                in_tool_phase[0] = False
+                tool_trace.clear()
+                stream_buf.clear()
+
             # Always register callbacks (provider may upgrade to streaming internally)
             callbacks = Callbacks(
                 on_text=on_text,
                 on_tool_start=on_tool_start,
                 on_tool_end=on_tool_end,
+                on_turn_start=on_turn_start,
             )
 
             # Run agent loop (with wrapped prompt)

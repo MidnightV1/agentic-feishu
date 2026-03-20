@@ -107,4 +107,5 @@ class Callbacks:
     on_text: AsyncCallback | None = None
     on_tool_start: AsyncCallback | None = None
     on_tool_end: AsyncCallback | None = None
+    on_turn_start: AsyncCallback | None = None
     on_turn_end: AsyncCallback | None = None

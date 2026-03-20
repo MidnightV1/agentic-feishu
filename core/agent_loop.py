@@ -53,6 +53,8 @@ class AgentLoop:
             log.debug("turn %d/%d", turn, config.max_turns)
 
             # --- Call provider ---
+            if cb.on_turn_start:
+                await cb.on_turn_start(turn)
             assistant_msg, turn_usage = await self._call_provider(
                 msgs, tool_schemas, config, cb
             )

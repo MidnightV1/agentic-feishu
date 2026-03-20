@@ -278,24 +278,6 @@ async def unassign_task(task_id: str, open_ids: str) -> dict:
     return result
 
 
-@tool(description="Create a section in the Feishu bot tasklist", parallel_safe=False)
-async def create_section(name: str) -> dict:
-    """Create a section in the bot's tasklist.
-
-    Args:
-        name: Section name
-    """
-    api = _require_api()
-    result = await api.create_task_section(name)
-    return result
-
-
-@tool(description="List sections in the Feishu bot tasklist", parallel_safe=True)
-async def list_sections() -> list:
-    """List all sections in the bot's tasklist."""
-    api = _require_api()
-    result = await api.list_task_sections()
-    return result
 
 
 @tool(description="Get a categorized snapshot of all open Feishu tasks", parallel_safe=True)

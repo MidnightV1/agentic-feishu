@@ -101,6 +101,7 @@ _TOOL_CATEGORY: dict[str, str] = {
     "list_events": "calendar", "list_tasks": "task", "list_comments": "read",
     "list_sections": "list", "list_drive_files": "drive", "list_folder": "drive",
     "list_bitable_tables": "bitable",
+    "create_bitable": "create", "create_spreadsheet": "create",
     "query_bitable_records": "bitable", "add_bitable_record": "bitable",
     "send_message": "send", "reply_comment": "send",
     "append_document": "update", "transfer_document_owner": "perm",

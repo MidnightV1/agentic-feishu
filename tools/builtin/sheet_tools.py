@@ -27,6 +27,18 @@ def _require_api() -> Any:
     return _api
 
 
+@tool(description="Create a new spreadsheet. Optionally place it in a specific Drive folder.", parallel_safe=False)
+async def create_spreadsheet(title: str, folder_token: str = "") -> dict:
+    """Create a new spreadsheet.
+
+    Args:
+        title: Spreadsheet title
+        folder_token: Parent Drive folder token (empty = root)
+    """
+    api = _require_api()
+    return await api.create_spreadsheet(title, folder_token)
+
+
 @tool(description="Get spreadsheet metadata and list worksheets", parallel_safe=True)
 async def get_spreadsheet_info(spreadsheet_token: str) -> dict:
     """Get metadata and worksheet list for a spreadsheet.

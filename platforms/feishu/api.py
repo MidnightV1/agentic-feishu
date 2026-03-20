@@ -1169,6 +1169,24 @@ class FeishuAPI:
 
     # ── Bitable ────────────────────────────────────────────────────
 
+    async def create_bitable(self, name: str, folder_token: str = "") -> dict:
+        """Create a new Bitable app."""
+        body: dict[str, Any] = {"name": name}
+        if folder_token:
+            body["folder_token"] = folder_token
+        try:
+            resp = await self._raw_request(
+                "POST", "/open-apis/bitable/v1/apps", body=body,
+            )
+            app = resp.get("data", {}).get("app", {})
+            return {
+                "app_token": app.get("app_token", ""),
+                "name": app.get("name", name),
+                "url": app.get("url", ""),
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
     async def list_bitable_tables(self, app_token: str) -> list:
         """List all tables in a Bitable app."""
         token = await self._get_tenant_token()
@@ -1291,6 +1309,24 @@ class FeishuAPI:
             return {"error": str(e)}
 
     # ── Spreadsheet ────────────────────────────────────────────────
+
+    async def create_spreadsheet(self, title: str, folder_token: str = "") -> dict:
+        """Create a new spreadsheet."""
+        body: dict[str, Any] = {"title": title}
+        if folder_token:
+            body["folder_token"] = folder_token
+        try:
+            resp = await self._raw_request(
+                "POST", "/open-apis/sheets/v3/spreadsheets", body=body,
+            )
+            sheet = resp.get("data", {}).get("spreadsheet", {})
+            return {
+                "spreadsheet_token": sheet.get("spreadsheet_token", ""),
+                "title": sheet.get("title", title),
+                "url": sheet.get("url", ""),
+            }
+        except Exception as e:
+            return {"error": str(e)}
 
     async def get_spreadsheet_info(self, spreadsheet_token: str) -> dict:
         """Get spreadsheet metadata and worksheet list."""

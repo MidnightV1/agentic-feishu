@@ -29,6 +29,18 @@ def _require_api() -> Any:
     return _api
 
 
+@tool(description="Create a new Bitable app (multidimensional table). Optionally place it in a specific Drive folder.", parallel_safe=False)
+async def create_bitable(name: str, folder_token: str = "") -> dict:
+    """Create a new Bitable app.
+
+    Args:
+        name: Name of the Bitable app
+        folder_token: Parent Drive folder token (empty = root)
+    """
+    api = _require_api()
+    return await api.create_bitable(name, folder_token)
+
+
 @tool(description="List tables in a Bitable app", parallel_safe=True)
 async def list_bitable_tables(app_token: str) -> list:
     """List all tables in a Bitable app.

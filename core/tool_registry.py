@@ -27,6 +27,9 @@ class Tool:
     handler: Callable         # async or sync function
     parallel_safe: bool = False
     timeout: float = 30.0
+    # Lazy loading: if set, tool starts with summary and expands on first use
+    summary: str = ""         # short description (action names only)
+    deferred: bool = False    # if True, uses lazy loading pattern
 
 
 # ── Type mapping ──────────────────────────────────────────────────────────────
@@ -143,6 +146,8 @@ def tool(
     description: str = "",
     parallel_safe: bool = False,
     timeout: float = 30.0,
+    summary: str = "",
+    deferred: bool = False,
 ) -> Callable:
     """Decorator to register a function as an agent tool.
 
@@ -153,6 +158,11 @@ def tool(
 
         @tool(parallel_safe=True)
         async def search(query: str) -> str:
+            ...
+
+        # Deferred (lazy-loaded) skill tool:
+        @tool(description="Full action docs...", summary="Short one-liner", deferred=True)
+        async def feishu_doc(action: str, params: dict) -> dict:
             ...
     """
 
@@ -169,6 +179,8 @@ def tool(
             "parameters": _build_parameters_schema(func),
             "parallel_safe": parallel_safe,
             "timeout": timeout,
+            "summary": summary,
+            "deferred": deferred,
         }
 
         @wraps(func)
@@ -187,10 +199,21 @@ def tool(
 # ── ToolRegistry ──────────────────────────────────────────────────────────────
 
 class ToolRegistry:
-    """Registry for agent tools. Supports decorator-based and manual registration."""
+    """Registry for agent tools. Supports decorator-based and manual registration.
+
+    Supports lazy (deferred) loading for skill-style tools:
+    - Deferred tools start with a short summary in their schema
+    - On first invocation, instead of executing, they return their full
+      documentation as a tool result and get "expanded"
+    - Once expanded, subsequent calls execute normally and the full
+      description is included in the schema
+    This mirrors Claude Code's Skill loading pattern: frontmatter-only
+    at startup, full SKILL.md body on trigger.
+    """
 
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
+        self._expanded: set[str] = set()  # tracks which deferred tools have been expanded
 
     # -- Registration ----------------------------------------------------------
 
@@ -213,6 +236,8 @@ class ToolRegistry:
             handler=func,
             parallel_safe=meta["parallel_safe"],
             timeout=meta["timeout"],
+            summary=meta.get("summary", ""),
+            deferred=meta.get("deferred", False),
         ))
 
     def discover(self, module: Any) -> int:
@@ -271,20 +296,64 @@ class ToolRegistry:
             return True
         return False
 
+    # -- Lazy loading ----------------------------------------------------------
+
+    def expand(self, name: str) -> None:
+        """Mark a deferred tool as expanded (full schema will be used)."""
+        self._expanded.add(name)
+
+    def collapse(self, name: str) -> None:
+        """Reset a deferred tool to collapsed state."""
+        self._expanded.discard(name)
+
+    def reset_expansions(self) -> None:
+        """Reset all expansions (e.g. new session)."""
+        self._expanded.clear()
+
+    def is_expanded(self, name: str) -> bool:
+        return name in self._expanded
+
     # -- Schema export ---------------------------------------------------------
 
+    # Minimal parameters schema for collapsed skill tools
+    _COLLAPSED_PARAMS: dict = {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "description": "Action name (see description)"},
+            "params": {"type": "object", "description": "Action parameters"},
+        },
+        "required": ["action"],
+    }
+
     def get_tool_schemas(self) -> list[dict]:
-        """Get all tool schemas in OpenAI function-calling format."""
+        """Get all tool schemas in OpenAI function-calling format.
+
+        Deferred tools that haven't been expanded yet use their short summary
+        and minimal parameters. Expanded (or non-deferred) tools use their
+        full description and parameters.
+        """
         schemas: list[dict] = []
         for t in self._tools.values():
-            schemas.append({
-                "type": "function",
-                "function": {
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": t.parameters,
-                },
-            })
+            if t.deferred and t.name not in self._expanded:
+                # Collapsed: short summary + minimal params
+                schemas.append({
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.summary or t.description,
+                        "parameters": self._COLLAPSED_PARAMS,
+                    },
+                })
+            else:
+                # Expanded or non-deferred: full schema
+                schemas.append({
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.parameters,
+                    },
+                })
         return schemas
 
     # -- Execution -------------------------------------------------------------
@@ -295,11 +364,26 @@ class ToolRegistry:
         arguments: dict,
         timeout: float | None = None,
     ) -> ToolResult:
-        """Execute a tool by name with given arguments. Handles timeout and errors."""
+        """Execute a tool by name with given arguments. Handles timeout and errors.
+
+        For deferred tools on first invocation: returns full documentation
+        instead of executing, then marks the tool as expanded.
+        """
         call_id = uuid.uuid4().hex[:12]
         t = self._tools.get(name)
         if t is None:
             return ToolResult(call_id, f"Error: unknown tool '{name}'", is_error=True)
+
+        # Lazy loading: first call to an unexpanded deferred tool returns docs
+        if t.deferred and name not in self._expanded:
+            self._expanded.add(name)
+            logger.info("Expanding deferred tool '%s' — returning full documentation", name)
+            doc = (
+                f"Tool '{name}' is now loaded. Here is the full documentation:\n\n"
+                f"{t.description}\n\n"
+                f"Please retry your call with the correct action and params."
+            )
+            return ToolResult(call_id, doc)
 
         effective_timeout = timeout if timeout is not None else t.timeout
 

@@ -30,7 +30,10 @@ def _require_api() -> Any:
     return _api
 
 
-@tool(description="""Feishu calendar operations.
+@tool(
+    summary="Feishu calendar operations: create, list, update, delete, freebusy",
+    deferred=True,
+    description="""Feishu calendar operations.
 
 Actions:
 - create: Create event. params: {summary, start_time, end_time, description?, attendees?}. MUST add requesting user as attendee (open_id from message context) so event appears in their calendar. MUST inform user after creation (title + time).
@@ -38,7 +41,8 @@ Actions:
 - update: Update event. params: {event_id, summary?, start_time?, end_time?, description?}
 - delete: Delete event (IRREVERSIBLE — confirm with user first). params: {event_id}
 - freebusy: Check free/busy status. params: {start_time, end_time, user_ids?} (user_ids is comma-separated open_id string, empty for bot's own calendar)
-""", parallel_safe=False)
+""", parallel_safe=False,
+)
 async def feishu_cal(action: str, params: dict = {}) -> dict | list:
     """Unified Feishu calendar tool.
 

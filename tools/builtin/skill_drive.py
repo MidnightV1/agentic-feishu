@@ -25,14 +25,18 @@ def _require_api() -> Any:
     return _api
 
 
-@tool(description="""Feishu Drive operations.
+@tool(
+    summary="Feishu Drive operations: list, search, create_folder, move",
+    deferred=True,
+    description="""Feishu Drive operations.
 
 Actions:
 - list: List files/folders. params: {folder_token?, page_size?=20}
 - search: Search files. params: {query, count?=10}
 - create_folder: Create folder. params: {name, parent_token} (parent_token REQUIRED)
 - move: Move file/folder. params: {file_token, target_folder_token}
-""", parallel_safe=False)
+""", parallel_safe=False,
+)
 async def feishu_drive(action: str, params: dict = {}) -> dict | list:
     """Dispatch Drive operations by action name.
 

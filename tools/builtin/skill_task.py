@@ -25,7 +25,10 @@ def _require_api() -> Any:
     return _api
 
 
-@tool(description="""Feishu task operations.
+@tool(
+    summary="Feishu task operations: create, get, list, update, complete, delete, assign, unassign, snapshot",
+    deferred=True,
+    description="""Feishu task operations.
 
 Actions:
 - create: Create task. params: {title, due_date?, description?}
@@ -38,7 +41,8 @@ Actions:
 - assign: Assign users. params: {task_id, open_ids} (comma-separated open_ids string)
 - unassign: Unassign users. params: {task_id, open_ids} (comma-separated open_ids string)
 - snapshot: Get categorized overview of all open tasks. No params needed.
-""", parallel_safe=False)
+""", parallel_safe=False,
+)
 async def feishu_task(action: str, params: dict = {}) -> dict | str | list:
     """Dispatch Feishu task operations by action name.
 

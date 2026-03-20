@@ -25,14 +25,18 @@ def _require_api() -> Any:
     return _api
 
 
-@tool(description="""Feishu Spreadsheet operations.
+@tool(
+    summary="Feishu Spreadsheet operations: create, info, read_range, write_range",
+    deferred=True,
+    description="""Feishu Spreadsheet operations.
 
 Actions:
 - create: Create spreadsheet. params: {title, folder_token?}. MUST add user as full_access after creation.
 - info: Get metadata and worksheets. params: {spreadsheet_token}
 - read_range: Read cells. params: {spreadsheet_token, sheet_id, range_str?="A1:Z100"}
 - write_range: Write cells. params: {spreadsheet_token, sheet_id, range_str, values} (values = 2D list)
-""", parallel_safe=False)
+""", parallel_safe=False,
+)
 async def feishu_sheet(action: str, params: dict = {}) -> dict | list:
     """Dispatch Spreadsheet operations by action name.
 

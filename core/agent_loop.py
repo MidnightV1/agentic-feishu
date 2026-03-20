@@ -43,7 +43,6 @@ class AgentLoop:
         # Append user prompt
         msgs.append(Message(role="user", content=prompt))
 
-        tool_schemas = self._tools.get_tool_schemas()
         total_usage = Usage()
         total_cost = 0.0
         turn = 0
@@ -51,6 +50,9 @@ class AgentLoop:
         while turn < config.max_turns:
             turn += 1
             log.debug("turn %d/%d", turn, config.max_turns)
+
+            # Refresh tool schemas each turn (deferred tools may have expanded)
+            tool_schemas = self._tools.get_tool_schemas()
 
             # --- Call provider ---
             if cb.on_turn_start:

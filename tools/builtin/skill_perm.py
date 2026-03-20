@@ -25,7 +25,10 @@ def _require_api() -> Any:
     return _api
 
 
-@tool(description="""Feishu document permission operations.
+@tool(
+    summary="Feishu document permission operations: list, get_sharing, add, remove, set_sharing",
+    deferred=True,
+    description="""Feishu document permission operations.
 
 Actions:
 - list: List collaborators. params: {doc_token, doc_type?="docx"}
@@ -33,7 +36,8 @@ Actions:
 - add: Add collaborator. params: {doc_token, member_id, perm?="full_access", member_type?="openid", doc_type?="docx"}
 - remove: Remove collaborator (IRREVERSIBLE). params: {doc_token, member_id, member_type?="openid", doc_type?="docx"}
 - set_sharing: Set link sharing. params: {doc_token, link_share_entity?="tenant_readable", doc_type?="docx"}. Values: "anyone_readable", "anyone_editable", "tenant_readable", "tenant_editable", "closed"
-""", parallel_safe=False)
+""", parallel_safe=False,
+)
 async def feishu_perm(action: str, params: dict = {}) -> dict | list:
     """Dispatch permission operations by action name.
 

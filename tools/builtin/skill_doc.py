@@ -30,7 +30,10 @@ def _require_api() -> Any:
     return _api
 
 
-@tool(description="""Feishu document operations.
+@tool(
+    summary="Feishu document operations: create, read, append, update, replace_section, search, list_comments, reply_comment, transfer_owner, send_message",
+    deferred=True,
+    description="""Feishu document operations.
 
 Actions:
 - create: Create document. params: {title, folder_token?}. MUST add requesting user as full_access collaborator after creation. Returns full link: https://feishu.cn/docx/{document_id}.
@@ -43,7 +46,8 @@ Actions:
 - reply_comment: Reply to a comment. params: {document_id, comment_id, content}
 - transfer_owner: Transfer document ownership (IRREVERSIBLE — confirm with user first). params: {document_id, new_owner_id}
 - send_message: Send message to a Feishu chat. params: {chat_id, text}. Only when user EXPLICITLY requests it. Never proactively send to other chats.
-""", parallel_safe=False)
+""", parallel_safe=False,
+)
 async def feishu_doc(action: str, params: dict) -> dict:
     """Dispatch Feishu document operations by action name.
 

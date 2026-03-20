@@ -25,7 +25,10 @@ def _require_api() -> Any:
     return _api
 
 
-@tool(description="""Feishu Bitable (multidimensional table) operations.
+@tool(
+    summary="Feishu Bitable operations: create, list_tables, query, add_record, update_record, delete_record",
+    deferred=True,
+    description="""Feishu Bitable (multidimensional table) operations.
 
 Actions:
 - create: Create Bitable app. params: {name, folder_token?}. MUST add user as full_access after creation.
@@ -34,7 +37,8 @@ Actions:
 - add_record: Add record. params: {app_token, table_id, fields}
 - update_record: Update record. params: {app_token, table_id, record_id, fields}
 - delete_record: Delete record (IRREVERSIBLE). params: {app_token, table_id, record_id}
-""", parallel_safe=False)
+""", parallel_safe=False,
+)
 async def feishu_bitable(action: str, params: dict = {}) -> dict | list:
     """Dispatch Bitable operations by action name.
 

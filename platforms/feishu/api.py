@@ -54,6 +54,38 @@ def _to_timestamp(s: str) -> str:
     return s
 
 
+def _to_rfc3339(s: str) -> str:
+    """Convert time string to RFC3339 format (required by freebusy API).
+
+    Returns: yyyy-mm-ddThh:mm:ss+08:00
+    """
+    s = s.strip()
+    from datetime import timedelta
+    tz_cn = timezone(offset=timedelta(hours=8))
+
+    # Unix timestamp → convert to datetime first
+    if s.isdigit() and len(s) >= 10:
+        dt = datetime.fromtimestamp(int(s), tz=tz_cn)
+        return dt.strftime("%Y-%m-%dT%H:%M:%S+08:00")
+
+    for fmt in (
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d",
+    ):
+        try:
+            dt = datetime.strptime(s, fmt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=tz_cn)
+            return dt.strftime("%Y-%m-%dT%H:%M:%S") + dt.strftime("%z")[:3] + ":" + dt.strftime("%z")[3:]
+        except ValueError:
+            continue
+    # Already RFC3339 or can't parse — return as-is
+    return s
+
+
 class FeishuAPI:
     """Async Feishu API client using lark-oapi."""
 
@@ -1003,9 +1035,10 @@ class FeishuAPI:
         Returns:
             dict with "busy_list" (list of busy intervals) or "error".
         """
+        # freebusy API requires RFC3339 format, not unix timestamps
         body: dict[str, Any] = {
-            "time_min": _to_timestamp(start_time),
-            "time_max": _to_timestamp(end_time),
+            "time_min": _to_rfc3339(start_time),
+            "time_max": _to_rfc3339(end_time),
         }
         if user_ids:
             body["user_id"] = user_ids[0]

@@ -40,7 +40,7 @@ async def list_bitable_tables(app_token: str) -> list:
     return await api.list_bitable_tables(app_token)
 
 
-@tool(description="Query records from a Bitable table", parallel_safe=True)
+@tool(description="Query records from a Bitable table. Use filter_expr to narrow results — avoid full table fetch. Field names are CASE-SENSITIVE.", parallel_safe=True)
 async def query_bitable_records(
     app_token: str,
     table_id: str,
@@ -97,7 +97,7 @@ async def update_bitable_record(
     return await api.update_bitable_record(app_token, table_id, record_id, fields)
 
 
-@tool(description="Delete a Bitable record", parallel_safe=False)
+@tool(description="Delete a Bitable record. IRREVERSIBLE — confirm with user before executing.", parallel_safe=False)
 async def delete_bitable_record(
     app_token: str,
     table_id: str,

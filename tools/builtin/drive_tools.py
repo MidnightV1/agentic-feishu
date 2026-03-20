@@ -48,7 +48,7 @@ async def search_drive(query: str, count: int = 10) -> list:
     return await api.search_drive(query, count)
 
 
-@tool(description="Create a folder in Feishu Drive", parallel_safe=False)
+@tool(description="Create a folder in Feishu Drive. Search for existing folder first to avoid duplicates.", parallel_safe=False)
 async def create_drive_folder(name: str, parent_token: str = "") -> dict:
     """Create a new folder in Drive.
 
@@ -60,7 +60,7 @@ async def create_drive_folder(name: str, parent_token: str = "") -> dict:
     return await api.create_drive_folder(name, parent_token)
 
 
-@tool(description="Move a file or folder in Feishu Drive", parallel_safe=False)
+@tool(description="Move a file or folder to another folder. Confirm target path with user before executing.", parallel_safe=False)
 async def move_drive_file(file_token: str, target_folder_token: str) -> dict:
     """Move a file or folder to another folder.
 

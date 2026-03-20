@@ -29,18 +29,28 @@ SUMMARY_PROMPT = """将以下对话历史压缩为结构化摘要。
 - 决策内容（保留文件路径、配置值、技术选型）
 - 决策理由
 
+### 涉及的文件与变更
+- 文件路径 → 做了什么变更
+- 创建的文档/任务（保留 ID 和链接）
+
 ### 当前状态
 - 已完成的任务
 - 进行中的工作
 - 待确认的事项
 
-### 用户偏好
-- 用户明确表达的偏好或纠正
+### 用户偏好与纠正
+- 用户明确表达的偏好
+- 用户对你行为的纠正（这些尤其重要，必须保留）
+
+### 上下文要点
+- 用户提到的背景信息
+- 尚未解决的问题
 
 ## 要求
-- 保留具体文件路径、命令、配置值
+- 保留具体文件路径、命令、配置值、文档 ID
 - 丢弃寒暄和已否决方案的细节
 - 优先保留最近的信息
+- 用户纠正的权重最高，必须完整保留
 """
 
 
@@ -206,10 +216,15 @@ class ContextManager:
 def _section_header(component_type: str) -> str:
     """Map component type to a markdown header."""
     headers = {
+        "soul": "# Soul",
+        "agent": "# Agent",
         "base_instructions": "# Instructions",
         "platform_rules": "# Platform",
+        "tool_guidelines": "# Tool Guidelines",
         "skill_descriptions": "# Available Skills",
         "environment": "# Environment",
+        "user_profile": "# User",
+        "memory": "# Memory",
         "persona": "# Persona",
         "session_context": "# Session Context",
         "recovery": "",  # RECOVERY_PREAMBLE already has its own header

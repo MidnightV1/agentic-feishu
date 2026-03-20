@@ -34,7 +34,7 @@ def _require_api() -> Any:
 # ── Document tools ────────────────────────────────────────────────
 
 
-@tool(description="Create a new Feishu document", parallel_safe=False)
+@tool(description="Create a Feishu document. After creation, MUST return the full link to user: https://feishu.cn/docx/{document_id}. Use folder_token to specify location.", parallel_safe=False)
 async def create_document(title: str, folder_token: str = "") -> dict:
     """Create a new Feishu document.
 
@@ -47,7 +47,7 @@ async def create_document(title: str, folder_token: str = "") -> dict:
     return result
 
 
-@tool(description="Read content from a Feishu document", parallel_safe=True)
+@tool(description="Read content from a Feishu document. Accepts document_id from URL or create_document result.", parallel_safe=True)
 async def read_document(document_id: str) -> str:
     """Read the content of a Feishu document.
 
@@ -59,7 +59,7 @@ async def read_document(document_id: str) -> str:
     return content
 
 
-@tool(description="Append markdown content to a Feishu document", parallel_safe=False)
+@tool(description="Append markdown content to a Feishu document. Use this to add content — do NOT create a new document if one already exists on the same topic.", parallel_safe=False)
 async def append_document(document_id: str, content: str) -> dict:
     """Append markdown content to an existing Feishu document.
 
@@ -72,7 +72,7 @@ async def append_document(document_id: str, content: str) -> dict:
     return result
 
 
-@tool(description="Search Feishu documents by keyword", parallel_safe=True)
+@tool(description="Search Feishu documents by keyword. Use short keywords, not full sentences.", parallel_safe=True)
 async def search_documents(query: str, count: int = 10) -> list:
     """Search Feishu documents.
 
@@ -111,7 +111,7 @@ async def reply_comment(document_id: str, comment_id: str, content: str) -> dict
     return result
 
 
-@tool(description="Replace a specific section in a Feishu document (heading to next same-level heading)", parallel_safe=False)
+@tool(description="Replace a specific section in a Feishu document (from heading to next same-level heading). Use heading_title to match exactly.", parallel_safe=False)
 async def replace_section(document_id: str, heading_title: str, new_content: str) -> dict:
     """Replace a document section identified by its heading title.
 
@@ -128,7 +128,7 @@ async def replace_section(document_id: str, heading_title: str, new_content: str
     return result
 
 
-@tool(description="Update a Feishu document (replace all content)", parallel_safe=False)
+@tool(description="Replace ALL content in a Feishu document. WARNING: destructive — deletes existing content first. Prefer append_document or replace_section for partial updates.", parallel_safe=False)
 async def update_document(document_id: str, content: str) -> dict:
     """Update a Feishu document by replacing all content.
 
@@ -141,7 +141,7 @@ async def update_document(document_id: str, content: str) -> dict:
     return result
 
 
-@tool(description="Transfer ownership of a Feishu document", parallel_safe=False)
+@tool(description="Transfer ownership of a Feishu document. IRREVERSIBLE — confirm with user before executing. Bot must be current owner.", parallel_safe=False)
 async def transfer_document_owner(document_id: str, new_owner_id: str) -> dict:
     """Transfer ownership of a Feishu document.
 
@@ -169,7 +169,7 @@ async def list_folder(folder_token: str = "") -> list:
 # ── Task tools ────────────────────────────────────────────────────
 
 
-@tool(description="Create a Feishu task", parallel_safe=False)
+@tool(description="Create a Feishu task in Bot's tasklist. Due date auto-converts from ISO/natural format. Infer due dates from user context (e.g., '下周五' → concrete date).", parallel_safe=False)
 async def create_task(title: str, due_date: str = "", description: str = "") -> dict:
     """Create a new Feishu task.
 
@@ -183,7 +183,7 @@ async def create_task(title: str, due_date: str = "", description: str = "") -> 
     return result
 
 
-@tool(description="List Feishu tasks", parallel_safe=True)
+@tool(description="List Feishu tasks. Default: incomplete only. Set completed=True to include completed tasks.", parallel_safe=True)
 async def list_tasks(completed: bool = False) -> list:
     """List Feishu tasks.
 
@@ -238,7 +238,7 @@ async def update_task(
     return result
 
 
-@tool(description="Delete a Feishu task", parallel_safe=False)
+@tool(description="Delete a Feishu task. IRREVERSIBLE — confirm with user before executing.", parallel_safe=False)
 async def delete_task(task_id: str) -> dict:
     """Delete a Feishu task.
 
@@ -309,7 +309,7 @@ async def task_snapshot() -> str:
 # ── Message tools ─────────────────────────────────────────────────
 
 
-@tool(description="Send a message to a Feishu chat", parallel_safe=False)
+@tool(description="Send a message to a Feishu chat. Only use when user EXPLICITLY requests sending a message. Never proactively send to other chats.", parallel_safe=False)
 async def send_message(chat_id: str, text: str) -> dict:
     """Send a text message to a Feishu chat.
 
@@ -337,7 +337,7 @@ async def list_events(days: int = 7) -> list:
     return events
 
 
-@tool(description="Create a calendar event", parallel_safe=False)
+@tool(description="Create a calendar event. MUST inform user after creation (time + title). If time unclear, ask first. Note: Bot calendar may not appear in user's own calendar.", parallel_safe=False)
 async def create_event(
     summary: str,
     start_time: str,
@@ -409,7 +409,7 @@ async def freebusy(
     return result
 
 
-@tool(description="Delete a Feishu calendar event", parallel_safe=False)
+@tool(description="Delete a calendar event. IRREVERSIBLE — confirm with user before executing.", parallel_safe=False)
 async def delete_event(event_id: str) -> dict:
     """Delete a calendar event.
 

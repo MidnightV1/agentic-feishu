@@ -16,7 +16,9 @@ from core.context_manager import ContextComponent, ContextConfig, ContextManager
 from core.tool_registry import ToolRegistry
 from core.types import RunConfig
 from infra.jsonl_store import JSONLStore
+from infra.memory import MemoryStore
 from infra.session import SessionStore
+from infra.user_profile import UserProfileStore
 from jobs.explorer import ExploreQueue
 from jobs.heartbeat import HeartbeatMonitor
 from jobs.scheduler import JobConfig, Scheduler
@@ -35,13 +37,15 @@ from tools.builtin import (
 log = logging.getLogger("agentic-feishu")
 
 
-def _load_persona(name: str) -> str:
-    """Load persona template from templates/personas/."""
-    persona_dir = Path(__file__).parent / "templates" / "personas"
-    path = persona_dir / f"{name}.md"
+def _load_template(name: str, subdir: str = "") -> str:
+    """Load a markdown template from templates/ directory."""
+    base = Path(__file__).parent / "templates"
+    if subdir:
+        base = base / subdir
+    path = base / name
     if path.exists():
         return path.read_text(encoding="utf-8")
-    log.warning("Persona '%s' not found at %s, using empty", name, path)
+    log.warning("Template '%s' not found at %s", name, path)
     return ""
 
 
@@ -135,23 +139,35 @@ async def main() -> None:
     )
 
     # ── System prompt (assembled from components) ────────────────
-    persona_text = _load_persona(settings.persona)
+    # Static components (same for all users/sessions)
+    soul_text = _load_template("soul.md")
+    agent_text = _load_template(f"{settings.persona}.md", subdir="agents")
+    if not agent_text:
+        # Fallback to old personas/ directory
+        agent_text = _load_template(f"{settings.persona}.md", subdir="personas")
     skill_descriptions = skill_registry.build_descriptions()
 
-    # Tool usage guidelines
+    # Tool usage guidelines (slimmed — core rules now in tool descriptions)
     guidelines_path = Path(__file__).parent / "templates" / "tool_guidelines.md"
     tool_guidelines = guidelines_path.read_text(encoding="utf-8") if guidelines_path.exists() else ""
 
-    components = [
-        ContextComponent(type="platform_rules", content=FEISHU_SYSTEM_PROMPT, priority=90),
-        ContextComponent(type="tool_guidelines", content=tool_guidelines, priority=80),
-        ContextComponent(type="persona", content=persona_text, priority=50),
+    base_components = [
+        ContextComponent(type="soul", content=soul_text, priority=100),
+        ContextComponent(type="agent", content=agent_text, priority=90),
+        ContextComponent(type="platform_rules", content=FEISHU_SYSTEM_PROMPT, priority=85),
+        ContextComponent(type="tool_guidelines", content=tool_guidelines, priority=75),
     ]
     if skill_descriptions:
-        components.append(
+        base_components.append(
             ContextComponent(type="skill_descriptions", content=skill_descriptions, priority=70)
         )
-    system_prompt = await context_mgr.build_system_prompt(components)
+
+    # Build base system prompt (without per-user components)
+    system_prompt = await context_mgr.build_system_prompt(base_components)
+
+    # ── Per-user stores ────────────────────────────────────────────
+    memory_store = MemoryStore(os.path.join(settings.data_dir, "memory"))
+    user_profile_store = UserProfileStore(os.path.join(settings.data_dir, "users"))
 
     # ── Session store ─────────────────────────────────────────────
     session_store = SessionStore(
@@ -195,6 +211,9 @@ async def main() -> None:
         run_config=run_config,
         system_prompt=system_prompt,
         on_explore=_on_explore,
+        memory_store=memory_store,
+        user_profile_store=user_profile_store,
+        context_manager=context_mgr,
     )
     adapter.set_media_handler(media_handler, feishu_api)
     await adapter.start()

@@ -20,9 +20,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from core.agent_loop import AgentLoop
-from core.context_manager import build_recovery_context
+from core.context_manager import ContextComponent, ContextManager, build_recovery_context
 from core.types import Callbacks, Message, RunConfig
+from infra.memory import MemoryStore
 from infra.session import SessionStore, SessionRecord
+from infra.user_profile import UserProfileStore
 from platforms.feishu.dispatcher import FeishuDispatcher
 from platforms.feishu.media import MediaHandler
 from platforms.feishu.tags import wrap_user_input, inject_notifications, parse_output
@@ -109,6 +111,9 @@ class FeishuAdapter:
         usage_tracker: Any = None,  # infra.usage.UsageTracker (optional)
         on_explore: Any = None,    # async callback(hints: str) for explore processing
         on_task_plan: Any = None,  # async callback(plan_json: str, chat_id: str) for orchestration
+        memory_store: MemoryStore | None = None,
+        user_profile_store: UserProfileStore | None = None,
+        context_manager: ContextManager | None = None,
     ):
         self.app_id = app_id
         self.app_secret = app_secret
@@ -121,6 +126,9 @@ class FeishuAdapter:
         self._system_prompt = system_prompt
         self._on_explore = on_explore
         self._on_task_plan = on_task_plan
+        self._memory = memory_store
+        self._user_profile = user_profile_store
+        self._context_mgr = context_manager
         self._media: MediaHandler | None = None
         self._feishu_api: Any = None  # set by set_media_handler
 
@@ -344,6 +352,24 @@ class FeishuAdapter:
             )
         )
 
+    # ── Per-user context ─────────────────────────────────────────
+
+    def _build_user_context(self, sender_id: str) -> str:
+        """Build per-user context (profile + memory) to append to system prompt."""
+        parts: list[str] = []
+
+        if self._user_profile:
+            profile = self._user_profile.build_context(sender_id)
+            if profile:
+                parts.append(profile)
+
+        if self._memory:
+            memory = self._memory.build_context(sender_id)
+            if memory:
+                parts.append(memory)
+
+        return "\n\n".join(parts)
+
     # ── Agent loop integration ────────────────────────────────────
 
     async def _process_message(
@@ -364,7 +390,13 @@ class FeishuAdapter:
             # Load session history
             session = await self._sessions.get(session_key)
             history_msgs: list[Message] = []
-            effective_system = self._system_prompt
+
+            # Build effective system prompt with per-user context
+            user_context = self._build_user_context(sender_id)
+            effective_system = (
+                f"{self._system_prompt}\n\n{user_context}"
+                if user_context else self._system_prompt
+            )
 
             if session:
                 raw = await self._sessions.get_messages(session_key, limit=50)

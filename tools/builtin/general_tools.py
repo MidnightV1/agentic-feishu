@@ -36,7 +36,7 @@ async def read_file(path: str, max_lines: int = 500) -> str:
         return f"Error reading {path}: {e}"
 
 
-@tool(description="Write content to a file", parallel_safe=False)
+@tool(description="Write content to a file, creating directories as needed. Overwrites existing content — verify intent before overwriting.", parallel_safe=False)
 async def write_file(path: str, content: str) -> str:
     """Write content to a file, creating directories as needed.
 
@@ -81,7 +81,7 @@ async def list_directory(path: str = ".", pattern: str = "") -> str:
         return f"Error listing {path}: {e}"
 
 
-@tool(description="Execute a shell command", parallel_safe=False, timeout=60.0)
+@tool(description="Execute a shell command. Output truncated at 50KB. Use for system operations only — prefer dedicated tools when available.", parallel_safe=False, timeout=60.0)
 async def bash(command: str, timeout: int = 30) -> str:
     """Execute a shell command and return output.
 

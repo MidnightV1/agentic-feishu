@@ -24,7 +24,7 @@ def _require_api() -> Any:
     return _api
 
 
-@tool(description="Add a collaborator to a document", parallel_safe=False)
+@tool(description="Add a collaborator to a document. Do NOT modify permissions unless user explicitly requests it.", parallel_safe=False)
 async def add_collaborator(
     doc_token: str,
     member_id: str,
@@ -45,7 +45,7 @@ async def add_collaborator(
     return await api.add_collaborator(doc_token, member_id, perm, member_type, doc_type)
 
 
-@tool(description="Remove a collaborator from a document", parallel_safe=False)
+@tool(description="Remove a collaborator from a document. IRREVERSIBLE — confirm with user. Do NOT modify unless explicitly requested.", parallel_safe=False)
 async def remove_collaborator(
     doc_token: str,
     member_id: str,
@@ -64,7 +64,7 @@ async def remove_collaborator(
     return await api.remove_collaborator(doc_token, member_id, member_type, doc_type)
 
 
-@tool(description="Set document public sharing settings", parallel_safe=False)
+@tool(description="Set document public sharing level. Do NOT modify unless user explicitly requests it. Explain current state when sharing.", parallel_safe=False)
 async def set_public_sharing(
     doc_token: str,
     link_share_entity: str = "tenant_readable",

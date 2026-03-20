@@ -46,6 +46,7 @@ class ParsedOutput:
 def wrap_user_input(
     text: str,
     sender_name: str = "",
+    sender_id: str = "",
     chat_id: str = "",
     chat_type: str = "",
     timestamp: datetime | None = None,
@@ -66,7 +67,12 @@ def wrap_user_input(
     else:
         inner = f"[{ts_str}] {text}"
 
-    return f"<user-input>\n{inner}\n</user-input>"
+    # Inject sender open_id so tools (e.g. calendar) can reference the user
+    meta = ""
+    if sender_id:
+        meta = f"\n<sender-context open_id=\"{sender_id}\" />"
+
+    return f"<user-input>\n{inner}\n</user-input>{meta}"
 
 
 def inject_notifications(prompt: str, notifications: list[str]) -> str:

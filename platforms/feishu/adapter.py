@@ -482,6 +482,7 @@ class FeishuAdapter:
             wrapped_prompt = wrap_user_input(
                 text,
                 sender_name=sender_name,
+                sender_id=sender_id,
                 chat_id=chat_id,
                 chat_type=chat_type,
             )

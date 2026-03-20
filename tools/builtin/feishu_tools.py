@@ -337,12 +337,13 @@ async def list_events(days: int = 7) -> list:
     return events
 
 
-@tool(description="Create a calendar event. MUST inform user after creation (time + title). If time unclear, ask first. Note: Bot calendar may not appear in user's own calendar.", parallel_safe=False)
+@tool(description="Create a calendar event. MUST inform user after creation (time + title). If time unclear, ask first. IMPORTANT: Always add the requesting user as attendee (use their open_id from message context) so the event appears in their calendar, not just the bot's.", parallel_safe=False)
 async def create_event(
     summary: str,
     start_time: str,
     end_time: str,
     description: str = "",
+    attendees: list[str] | None = None,
 ) -> dict:
     """Create a calendar event.
 
@@ -351,6 +352,7 @@ async def create_event(
         start_time: Start time in ISO format
         end_time: End time in ISO format
         description: Optional event description
+        attendees: List of open_id strings to add as attendees
     """
     api = _require_api()
     result = await api.create_event(
@@ -358,6 +360,7 @@ async def create_event(
         start_time=start_time,
         end_time=end_time,
         description=description,
+        attendees=attendees,
     )
     return result
 

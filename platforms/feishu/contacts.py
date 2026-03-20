@@ -89,8 +89,8 @@ class ContactStore:
     async def _fetch_name(self, open_id: str) -> str:
         """Fetch user display name from Feishu contact API."""
         try:
-            resp = await asyncio.to_thread(
-                self._feishu_api.get,
+            resp = await self._feishu_api._raw_request(
+                "GET",
                 f"/open-apis/contact/v3/users/{open_id}",
                 params={"user_id_type": "open_id"},
             )

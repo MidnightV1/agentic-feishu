@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any, AsyncIterator
@@ -109,7 +110,20 @@ class OpenAIProvider(BaseProvider):
 
     async def _complete(self, params: dict[str, Any]) -> Message:
         params["stream"] = False
-        response = await self._client.chat.completions.create(**params)
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                response = await self._client.chat.completions.create(**params)
+                break
+            except (openai.APIConnectionError, openai.APITimeoutError) as exc:
+                last_exc = exc
+                if attempt < 2:
+                    wait = 2 ** attempt  # 1s, 2s
+                    logger.warning("API connection error (attempt %d/3), retrying in %ds: %s",
+                                   attempt + 1, wait, exc)
+                    await asyncio.sleep(wait)
+                    continue
+                raise
         choice = response.choices[0]
 
         if response.usage:

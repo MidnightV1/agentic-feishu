@@ -1548,6 +1548,53 @@ class FeishuAPI:
 
     # ── Permission ─────────────────────────────────────────────────
 
+    async def list_collaborators(
+        self, doc_token: str, doc_type: str = "docx",
+    ) -> list:
+        """List all collaborators on a document."""
+        try:
+            resp = await self._raw_request(
+                "GET",
+                f"/open-apis/drive/v1/permissions/{doc_token}/members",
+                params={"type": doc_type},
+            )
+            if resp.get("code") != 0:
+                return [{"error": f"{resp.get('code')}: {resp.get('msg')}"}]
+            items = resp.get("data", {}).get("items", [])
+            return [
+                {
+                    "member_type": m.get("member_type", ""),
+                    "member_id": m.get("member_id", ""),
+                    "perm": m.get("perm", ""),
+                    "name": m.get("name", ""),
+                }
+                for m in items
+            ] if items else []
+        except Exception as e:
+            return [{"error": str(e)}]
+
+    async def get_public_sharing(
+        self, doc_token: str, doc_type: str = "docx",
+    ) -> dict:
+        """Get public sharing settings for a document."""
+        try:
+            resp = await self._raw_request(
+                "GET",
+                f"/open-apis/drive/v1/permissions/{doc_token}/public",
+                params={"type": doc_type},
+            )
+            if resp.get("code") != 0:
+                return {"error": f"{resp.get('code')}: {resp.get('msg')}"}
+            ps = resp.get("data", {}).get("permission_public", {})
+            return {
+                "link_share_entity": ps.get("link_share_entity", ""),
+                "external_access_entity": ps.get("external_access_entity", ""),
+                "invite_external": ps.get("invite_external", False),
+                "security_entity": ps.get("security_entity", ""),
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
     async def add_collaborator(
         self,
         doc_token: str,

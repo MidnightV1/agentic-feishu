@@ -29,7 +29,7 @@ def _require_api() -> Any:
     return _api
 
 
-@tool(description="Create a new Bitable app (multidimensional table). Optionally place it in a specific Drive folder.", parallel_safe=False)
+@tool(description="Create a new Bitable app (multidimensional table). Optionally place it in a specific Drive folder. After creation, MUST add the requesting user as full_access collaborator via add_collaborator.", parallel_safe=False)
 async def create_bitable(name: str, folder_token: str = "") -> dict:
     """Create a new Bitable app.
 

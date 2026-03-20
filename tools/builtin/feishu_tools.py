@@ -34,7 +34,7 @@ def _require_api() -> Any:
 # ── Document tools ────────────────────────────────────────────────
 
 
-@tool(description="Create a Feishu document. After creation, MUST return the full link to user: https://feishu.cn/docx/{document_id}. Use folder_token to specify location.", parallel_safe=False)
+@tool(description="Create a Feishu document. After creation, MUST: 1) add the requesting user as full_access collaborator (use add_collaborator with their open_id), 2) return the full link: https://feishu.cn/docx/{document_id}.", parallel_safe=False)
 async def create_document(title: str, folder_token: str = "") -> dict:
     """Create a new Feishu document.
 

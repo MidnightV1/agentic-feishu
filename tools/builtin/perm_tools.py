@@ -24,6 +24,36 @@ def _require_api() -> Any:
     return _api
 
 
+@tool(description="List all collaborators on a document with their permission levels", parallel_safe=True)
+async def list_collaborators(
+    doc_token: str,
+    doc_type: str = "docx",
+) -> list:
+    """List all collaborators on a Feishu document.
+
+    Args:
+        doc_token: Document token
+        doc_type: Document type ("docx", "sheet", "bitable", etc.)
+    """
+    api = _require_api()
+    return await api.list_collaborators(doc_token, doc_type)
+
+
+@tool(description="Get public sharing settings for a document (link sharing level, external access)", parallel_safe=True)
+async def get_public_sharing(
+    doc_token: str,
+    doc_type: str = "docx",
+) -> dict:
+    """Get the current public sharing settings for a document.
+
+    Args:
+        doc_token: Document token
+        doc_type: Document type ("docx", "sheet", "bitable", etc.)
+    """
+    api = _require_api()
+    return await api.get_public_sharing(doc_token, doc_type)
+
+
 @tool(description="Add a collaborator to a document. Do NOT modify permissions unless user explicitly requests it.", parallel_safe=False)
 async def add_collaborator(
     doc_token: str,

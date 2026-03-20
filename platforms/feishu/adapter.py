@@ -106,6 +106,7 @@ _TOOL_CATEGORY: dict[str, str] = {
     "send_message": "send", "reply_comment": "send",
     "append_document": "update", "transfer_document_owner": "perm",
     "add_collaborator": "perm", "remove_collaborator": "perm",
+    "list_collaborators": "perm", "get_public_sharing": "perm",
     "set_public_sharing": "perm",
     "assign_task": "task", "unassign_task": "task", "complete_task": "task",
     "task_snapshot": "task",

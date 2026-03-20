@@ -369,28 +369,25 @@ class FeishuAPI:
         return table_bid
 
     async def search_documents(self, query: str, count: int = 10) -> list:
-        client = self._ensure_client()
-        from lark_oapi.api.suite.v1 import SearchObjectRequest
-
-        req = (
-            SearchObjectRequest.builder()
-            .query(query)
-            .count(count)
-            .build()
-        )
-
+        """Search documents via Feishu suite search API (REST)."""
         try:
-            resp = await client.suite.v1.search_object.asearch(req)
-            if not resp.success():
-                return [{"error": f"{resp.code}: {resp.msg}"}]
-            items = resp.data.items or []
+            resp = await self._raw_request(
+                "POST",
+                "/open-apis/suite/docs-api/search/object",
+                body={"search_key": query, "count": min(count, 50), "offset": 0,
+                      "owner_ids": [], "chat_ids": [], "docs_types": []},
+            )
+            if resp.get("code") != 0:
+                return [{"error": f"{resp.get('code')}: {resp.get('msg')}"}]
+            docs = resp.get("data", {}).get("docs_entities", [])
             return [
                 {
-                    "title": item.title,
-                    "url": item.url,
-                    "type": item.type,
+                    "title": doc.get("title", ""),
+                    "url": doc.get("url", ""),
+                    "type": doc.get("docs_type", ""),
+                    "doc_token": doc.get("docs_token", ""),
                 }
-                for item in items
+                for doc in docs[:count]
             ]
         except Exception as e:
             return [{"error": str(e)}]

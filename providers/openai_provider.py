@@ -31,7 +31,10 @@ class OpenAIProvider(BaseProvider):
         max_tokens: int = 8192,
         name_override: str = "",
     ):
-        self._client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url)
+        self._client = openai.AsyncOpenAI(
+            api_key=api_key, base_url=base_url,
+            max_retries=3, timeout=120.0,
+        )
         self._model = model
         self._max_tokens = max_tokens
         self._name_override = name_override
@@ -110,20 +113,7 @@ class OpenAIProvider(BaseProvider):
 
     async def _complete(self, params: dict[str, Any]) -> Message:
         params["stream"] = False
-        last_exc: Exception | None = None
-        for attempt in range(3):
-            try:
-                response = await self._client.chat.completions.create(**params)
-                break
-            except (openai.APIConnectionError, openai.APITimeoutError) as exc:
-                last_exc = exc
-                if attempt < 2:
-                    wait = 2 ** attempt  # 1s, 2s
-                    logger.warning("API connection error (attempt %d/3), retrying in %ds: %s",
-                                   attempt + 1, wait, exc)
-                    await asyncio.sleep(wait)
-                    continue
-                raise
+        response = await self._client.chat.completions.create(**params)
         choice = response.choices[0]
 
         if response.usage:

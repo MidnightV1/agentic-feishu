@@ -618,12 +618,6 @@ class FeishuAdapter:
                 in_tool_phase[0] = False
                 stream_buf.append(delta)
 
-                # Throttle card updates to ~5 QPS
-                full_text = "".join(stream_buf)
-                preview = _strip_tags_for_preview(full_text)
-                if thinking_id and len(preview) > 5:
-                    await self._dispatcher.update_card(thinking_id, preview + " ▍")
-
             tool_trace: list[str] = []  # current round's tool trace
 
             async def on_tool_start(name: str, arguments=None) -> None:
@@ -640,10 +634,8 @@ class FeishuAdapter:
                 last_activity[0] = time.monotonic()
                 if thinking_id and tool_trace:
                     is_err = result and getattr(result, "is_error", False)
-                    # Replace trailing verb with done marker
-                    cat = _TOOL_CATEGORY.get(name, "")
-                    icon = _TOOL_ICONS.get(cat, _FALLBACK_ICON)
-                    tool_trace[-1] = f"{icon} {name} {'❌' if is_err else '✓'}"
+                    # Keep the easter egg label, just append status marker
+                    tool_trace[-1] = tool_trace[-1] + (" ❌" if is_err else " ✓")
                     await self._dispatcher.update_card(
                         thinking_id, "\n".join(tool_trace)
                     )

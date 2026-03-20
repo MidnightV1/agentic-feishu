@@ -171,8 +171,12 @@ class FeishuAPI:
                     # Some APIs return non-standard JSON (extra data, etc.)
                     import json as _json
                     text = resp.text.strip()
-                    decoder = _json.JSONDecoder()
-                    data, _ = decoder.raw_decode(text)
+                    try:
+                        decoder = _json.JSONDecoder()
+                        parsed, _ = decoder.raw_decode(text)
+                        data = parsed if isinstance(parsed, dict) else {"code": 0, "data": parsed}
+                    except _json.JSONDecodeError:
+                        data = {"code": -1, "msg": f"Unparseable response: {text[:200]}"}
             except httpx.HTTPError as exc:
                 last_exc = exc
                 if attempt < 2:
@@ -1012,12 +1016,14 @@ class FeishuAPI:
                 FreebusyListRequest,
                 FreebusyListRequestBody,
             )
+            from lark_oapi.api.calendar.v4.model import UserId
 
             req_body_builder = FreebusyListRequestBody.builder()
             req_body_builder = req_body_builder.time_min(body["time_min"])
             req_body_builder = req_body_builder.time_max(body["time_max"])
-            if "user_id" in body:
-                req_body_builder = req_body_builder.user_id(body["user_id"])
+            if user_ids:
+                uid_obj = UserId.builder().open_id(user_ids[0]).build()
+                req_body_builder = req_body_builder.user_id(uid_obj)
 
             req = (
                 FreebusyListRequest.builder()

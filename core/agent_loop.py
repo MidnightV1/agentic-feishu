@@ -105,11 +105,25 @@ class AgentLoop:
         if config.stream:
             return await self._call_streaming(messages, tool_schemas, cb, **kwargs)
         else:
-            msg = await self._provider.chat(
+            result = await self._provider.chat(
                 messages, tools=tool_schemas or None, stream=False, **kwargs
             )
-            usage = getattr(msg, "_usage", Usage())
-            return msg, usage
+            # Provider may upgrade to streaming internally (e.g. reasoning models)
+            if hasattr(result, "__aiter__"):
+                return await self._consume_stream(result, cb)
+            usage = getattr(self._provider, "_last_usage", Usage())
+            return result, usage
+
+    async def _consume_stream(self, stream, cb: Callbacks) -> tuple[Message, Usage]:
+        """Consume a stream iterator returned by provider (internal upgrade to streaming)."""
+        async for text_delta in stream:
+            if cb.on_text and isinstance(text_delta, str):
+                await cb.on_text(text_delta)
+        msg = getattr(self._provider, "_last_message", None)
+        usage = getattr(self._provider, "_last_usage", Usage())
+        if msg is None:
+            msg = Message(role="assistant", content="")
+        return msg, usage
 
     async def _call_streaming(
         self,
@@ -128,19 +142,7 @@ class AgentLoop:
             messages, tools=tool_schemas or None, stream=True, **kwargs
         )
 
-        async for text_delta in stream:
-            if cb.on_text and isinstance(text_delta, str):
-                await cb.on_text(text_delta)
-
-        # Provider stores assembled message + usage after stream ends
-        msg = getattr(self._provider, "_last_message", None)
-        usage = getattr(self._provider, "_last_usage", Usage())
-
-        if msg is None:
-            # Fallback: provider didn't set _last_message
-            msg = Message(role="assistant", content="")
-
-        return msg, usage
+        return await self._consume_stream(stream, cb)
 
     async def _execute_tools(
         self, tool_calls: list[ToolCall], cb: Callbacks

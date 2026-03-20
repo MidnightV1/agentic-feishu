@@ -71,6 +71,10 @@ class OpenAIProvider(BaseProvider):
         if self._is_reasoning:
             kwargs.pop("temperature", None)
             kwargs.pop("max_tokens", None)
+            # Force streaming for reasoning models to avoid connection timeouts
+            # during long thinking phases (non-streaming waits for full response)
+            stream = True
+            params["stream"] = True
         else:
             params["max_tokens"] = kwargs.pop("max_tokens", self._max_tokens)
             if "temperature" in kwargs:

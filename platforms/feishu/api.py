@@ -861,10 +861,10 @@ class FeishuAPI:
                     CreateCalendarEventAttendeeRequest.builder()
                     .calendar_id(cal_id)
                     .event_id(event_id)
+                    .user_id_type("open_id")
                     .request_body(
                         CreateCalendarEventAttendeeRequestBody.builder()
                         .attendees(attendee_list)
-                        .user_id_type("open_id")
                         .build()
                     )
                     .build()

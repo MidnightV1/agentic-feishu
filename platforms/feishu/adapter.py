@@ -510,7 +510,7 @@ class FeishuAdapter:
 
             # ── Streaming + pulse state ──
             stream_buf: list[str] = []
-            streaming_started = False
+            in_tool_phase = [False]  # True while tools are executing
             last_activity = [time.monotonic()]
             start_time = time.monotonic()
 
@@ -520,8 +520,8 @@ class FeishuAdapter:
                 while True:
                     elapsed = time.monotonic() - start_time
                     since_activity = time.monotonic() - last_activity[0]
-                    # Only update thinking card if we haven't started streaming yet
-                    if since_activity >= 6 and thinking_id and not streaming_started:
+                    # Show idle label when waiting for LLM (not during tool exec or streaming)
+                    if since_activity >= 6 and thinking_id and not in_tool_phase[0]:
                         try:
                             await self._dispatcher.update_card(
                                 thinking_id, _idle_label(elapsed)
@@ -533,13 +533,9 @@ class FeishuAdapter:
             pulse_task = asyncio.create_task(_pulse())
 
             async def on_text(delta: str) -> None:
-                nonlocal streaming_started
                 last_activity[0] = time.monotonic()
+                in_tool_phase[0] = False
                 stream_buf.append(delta)
-                now = time.time()
-
-                if not streaming_started:
-                    streaming_started = True
 
                 # Throttle card updates to ~5 QPS
                 full_text = "".join(stream_buf)
@@ -547,19 +543,24 @@ class FeishuAdapter:
                 if thinking_id and len(preview) > 5:
                     await self._dispatcher.update_card(thinking_id, preview + " ▍")
 
-            tool_trace: list[str] = []  # accumulated tool call trace
+            tool_trace: list[str] = []  # current round's tool trace
 
             async def on_tool_start(name: str, arguments=None) -> None:
                 last_activity[0] = time.monotonic()
-                if thinking_id and not streaming_started:
-                    tool_trace.append(f"🔧 {name}…")
+                # Entering tool phase: reset streaming state for this round
+                if not in_tool_phase[0]:
+                    in_tool_phase[0] = True
+                    tool_trace.clear()
+                    stream_buf.clear()
+                tool_trace.append(f"🔧 {name}…")
+                if thinking_id:
                     await self._dispatcher.update_card(
                         thinking_id, "\n".join(tool_trace)
                     )
 
             async def on_tool_end(name: str, result=None) -> None:
                 last_activity[0] = time.monotonic()
-                if thinking_id and not streaming_started and tool_trace:
+                if thinking_id and tool_trace:
                     # Update last entry with result status
                     is_err = result and getattr(result, "is_error", False)
                     tool_trace[-1] = f"🔧 {name} {'❌' if is_err else '✓'}"

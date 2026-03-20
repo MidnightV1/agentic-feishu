@@ -23,12 +23,15 @@ def _to_timestamp(s: str) -> str:
     """Convert time string to Unix timestamp string.
 
     Accepts: Unix timestamp, ISO 8601, or common datetime formats.
+    Returns seconds since epoch as string.
     """
     s = s.strip()
-    # Already a Unix timestamp
+    # Already a Unix timestamp (seconds)
     if s.isdigit() and len(s) >= 10:
         return s
     # Try ISO / common formats
+    from datetime import timedelta
+    tz_cn = timezone(offset=timedelta(hours=8))
     for fmt in (
         "%Y-%m-%dT%H:%M:%S%z",
         "%Y-%m-%dT%H:%M:%S",
@@ -39,13 +42,15 @@ def _to_timestamp(s: str) -> str:
         try:
             dt = datetime.strptime(s, fmt)
             if dt.tzinfo is None:
-                # Assume UTC+8 (China)
-                from datetime import timedelta
-                dt = dt.replace(tzinfo=timezone(offset=timedelta(hours=8)))
-            return str(int(dt.timestamp()))
+                dt = dt.replace(tzinfo=tz_cn)
+            ts = int(dt.timestamp())
+            # Sanity: reject timestamps before 2020
+            if ts < 1577836800:  # 2020-01-01 UTC
+                log.warning("_to_timestamp: parsed %r → %d (before 2020), suspicious", s, ts)
+            return str(ts)
         except ValueError:
             continue
-    # Fallback: return as-is and let API reject it
+    log.warning("_to_timestamp: could not parse %r, returning as-is", s)
     return s
 
 
@@ -821,9 +826,15 @@ class FeishuAPI:
 
         cal_id = await self._get_primary_calendar_id()
 
+        start_ts = _to_timestamp(start_time)
+        end_ts = _to_timestamp(end_time)
+        log.info("create_event: summary=%r, start=%r→%s, end=%r→%s, attendees=%s",
+                 summary, start_time, start_ts, end_time, end_ts,
+                 attendees if attendees else "none")
+
         event_builder = CalendarEvent.builder().summary(summary)
-        event_builder.start_time(TimeInfo.builder().timestamp(_to_timestamp(start_time)).build())
-        event_builder.end_time(TimeInfo.builder().timestamp(_to_timestamp(end_time)).build())
+        event_builder.start_time(TimeInfo.builder().timestamp(start_ts).build())
+        event_builder.end_time(TimeInfo.builder().timestamp(end_ts).build())
         if description:
             event_builder.description(description)
 

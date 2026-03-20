@@ -29,9 +29,10 @@ from platforms.feishu.media import MediaHandler
 from platforms.feishu.prompts import FEISHU_SYSTEM_PROMPT
 from providers.factory import create_provider
 from skills.loader import load_skills
+from tools.builtin import general_tools
 from tools.builtin import (
-    bitable_tools, drive_tools, feishu_tools,
-    general_tools, perm_tools, sheet_tools,
+    skill_doc, skill_task, skill_cal,
+    skill_bitable, skill_sheet, skill_drive, skill_perm,
 )
 
 log = logging.getLogger("agentic-feishu")
@@ -73,35 +74,23 @@ async def main() -> None:
     n = registry.discover(general_tools)
     log.info("Registered %d general tools", n)
 
-    # ── Feishu API + tools ────────────────────────────────────────
+    # ── Feishu API + skill-style tools ────────────────────────────
     feishu_api = FeishuAPI(
         app_id=settings.feishu.app_id,
         app_secret=settings.feishu.app_secret,
     )
     await feishu_api.start()
-    feishu_tools.configure(feishu_api)
-    n = registry.discover(feishu_tools)
-    log.info("Registered %d Feishu tools", n)
 
-    # Bitable tools
-    bitable_tools.configure(feishu_api)
-    n = registry.discover(bitable_tools)
-    log.info("Registered %d Bitable tools", n)
-
-    # Sheet tools
-    sheet_tools.configure(feishu_api)
-    n = registry.discover(sheet_tools)
-    log.info("Registered %d Sheet tools", n)
-
-    # Drive tools
-    drive_tools.configure(feishu_api)
-    n = registry.discover(drive_tools)
-    log.info("Registered %d Drive tools", n)
-
-    # Permission tools
-    perm_tools.configure(feishu_api)
-    n = registry.discover(perm_tools)
-    log.info("Registered %d Permission tools", n)
+    _skill_modules = [
+        skill_doc, skill_task, skill_cal,
+        skill_bitable, skill_sheet, skill_drive, skill_perm,
+    ]
+    total = 0
+    for mod in _skill_modules:
+        mod.configure(feishu_api)
+        n = registry.discover(mod)
+        total += n
+    log.info("Registered %d Feishu skill tools", total)
 
     # ── Custom tools (auto-discover) ─────────────────────────────
     custom_dir = Path(__file__).parent / "tools" / "custom"

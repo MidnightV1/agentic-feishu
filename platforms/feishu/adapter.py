@@ -90,36 +90,43 @@ _FALLBACK_ICON = "🔧"
 
 # Tool name → category mapping
 _TOOL_CATEGORY: dict[str, str] = {
-    "search_documents": "search", "search_drive": "search", "web_search": "web",
-    "read_document": "read", "read_file": "read",
-    "create_document": "create", "create_event": "calendar", "create_task": "task",
-    "create_section": "create", "create_drive_folder": "drive",
-    "update_document": "update", "update_event": "calendar", "update_task": "task",
-    "update_bitable_record": "bitable", "replace_section": "update",
-    "delete_event": "delete", "delete_task": "delete",
-    "delete_bitable_record": "bitable",
-    "list_events": "calendar", "list_tasks": "task", "list_comments": "read",
-    "list_drive_files": "drive", "list_folder": "drive",
-    "list_bitable_tables": "bitable",
-    "create_bitable": "create", "create_spreadsheet": "create",
-    "query_bitable_records": "bitable", "add_bitable_record": "bitable",
+    # Skill-style consolidated tools
+    "feishu_doc": "create", "feishu_task": "task", "feishu_cal": "calendar",
+    "feishu_bitable": "bitable", "feishu_sheet": "create",
+    "feishu_drive": "drive", "feishu_perm": "perm",
+    # General tools
+    "web_search": "web", "read_file": "read",
+    "bash": "bash", "list_directory": "list", "write_file": "create",
+}
+
+
+# Action → category overrides for skill-style tools (action refines the category)
+_ACTION_CATEGORY: dict[str, str] = {
+    "search": "search", "read": "read", "append": "update",
+    "update": "update", "replace_section": "update", "delete": "delete",
+    "list": "list", "list_tables": "list", "list_comments": "read",
+    "query": "bitable", "add_record": "bitable", "update_record": "bitable",
+    "delete_record": "bitable",
     "send_message": "send", "reply_comment": "send",
-    "append_document": "update", "transfer_document_owner": "perm",
-    "add_collaborator": "perm", "remove_collaborator": "perm",
-    "list_collaborators": "perm", "get_public_sharing": "perm",
-    "set_public_sharing": "perm",
-    "assign_task": "task", "unassign_task": "task", "complete_task": "task",
-    "task_snapshot": "task",
-    "freebusy": "calendar", "move_drive_file": "drive",
-    "bash": "bash", "list_directory": "list",
+    "transfer_owner": "perm", "complete": "task",
+    "assign": "task", "unassign": "task", "snapshot": "task",
+    "freebusy": "calendar", "move": "drive",
+    "create_folder": "drive", "info": "read",
+    "read_range": "read", "write_range": "update",
+    "get_sharing": "perm", "add": "perm", "remove": "perm", "set_sharing": "perm",
 }
 
 
 def _make_tool_label(tool_name: str, arguments: dict | None = None) -> str:
     """Generate a personality-driven progress label for a tool call."""
     cat = _TOOL_CATEGORY.get(tool_name, "")
+
+    # For skill-style tools, refine category by action
+    action = (arguments or {}).get("action", "")
+    if action and action in _ACTION_CATEGORY:
+        cat = _ACTION_CATEGORY[action]
+
     if not cat:
-        # Guess category from tool name prefix
         for prefix in ("search", "read", "create", "update", "delete", "list", "send"):
             if tool_name.startswith(prefix):
                 cat = prefix
@@ -131,10 +138,11 @@ def _make_tool_label(tool_name: str, arguments: dict | None = None) -> str:
     # Add context from arguments
     detail = ""
     if arguments:
-        detail = (arguments.get("query") or arguments.get("summary")
-                  or arguments.get("title") or arguments.get("document_id")
-                  or arguments.get("command") or "")
-        if detail and len(detail) > 25:
+        params = arguments.get("params", arguments)  # skill tools nest in params
+        detail = (params.get("query") or params.get("summary")
+                  or params.get("title") or params.get("document_id")
+                  or params.get("command") or "")
+        if isinstance(detail, str) and len(detail) > 25:
             detail = detail[:22] + "…"
 
     if detail:

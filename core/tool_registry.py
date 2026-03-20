@@ -60,13 +60,15 @@ def _type_to_schema(tp: type) -> dict:
 
 def _is_optional(tp: type) -> tuple[bool, type]:
     """Return (True, inner_type) if tp is Optional[X], else (False, tp)."""
-    origin = getattr(tp, "__origin__", None)
+    import types as _types
     args = getattr(tp, "__args__", None)
-    if origin is type(int | str):  # types.UnionType (3.10+ X | Y)
+    # Python 3.10+ union: X | None
+    if isinstance(tp, _types.UnionType):
         if args and len(args) == 2 and type(None) in args:
             inner = args[0] if args[1] is type(None) else args[1]
             return True, inner
-    # typing.Union
+    # typing.Union[X, None]
+    origin = getattr(tp, "__origin__", None)
     try:
         import typing
         if origin is typing.Union and args and len(args) == 2 and type(None) in args:

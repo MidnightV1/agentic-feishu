@@ -547,17 +547,32 @@ class FeishuAdapter:
                 if thinking_id and len(preview) > 5:
                     await self._dispatcher.update_card(thinking_id, preview + " ▍")
 
+            tool_trace: list[str] = []  # accumulated tool call trace
+
             async def on_tool_start(name: str, **_kw) -> None:
                 last_activity[0] = time.monotonic()
                 if thinking_id and not streaming_started:
+                    tool_trace.append(f"🔧 {name}…")
                     await self._dispatcher.update_card(
-                        thinking_id, f"🔧 {name}…"
+                        thinking_id, "\n".join(tool_trace)
                     )
 
+            async def on_tool_end(name: str, result=None, **_kw) -> None:
+                last_activity[0] = time.monotonic()
+                if thinking_id and not streaming_started and tool_trace:
+                    # Update last entry with result status
+                    is_err = result and getattr(result, "is_error", False)
+                    tool_trace[-1] = f"🔧 {name} {'❌' if is_err else '✓'}"
+                    await self._dispatcher.update_card(
+                        thinking_id, "\n".join(tool_trace)
+                    )
+
+            # Always register callbacks (provider may upgrade to streaming internally)
             callbacks = Callbacks(
                 on_text=on_text,
                 on_tool_start=on_tool_start,
-            ) if self._run_config.stream else None
+                on_tool_end=on_tool_end,
+            )
 
             # Run agent loop (with wrapped prompt)
             result = await self._loop.run(

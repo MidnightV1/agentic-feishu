@@ -683,7 +683,7 @@ class FeishuAdapter:
 
         Returns the replacement text (with doc link), or None to keep original.
         """
-        if not self._feishu_api or len(text) < LONG_CONTENT_THRESHOLD:
+        if not text or not self._feishu_api or len(text) < LONG_CONTENT_THRESHOLD:
             return None
 
         try:

@@ -22,7 +22,7 @@ class ContactStore:
         self._db_path = db_path
         self._feishu_api = None  # set via set_api()
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(db_path)
+        self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.execute("""
             CREATE TABLE IF NOT EXISTS contacts (
                 open_id TEXT PRIMARY KEY,

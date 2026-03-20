@@ -25,6 +25,7 @@ from core.types import Callbacks, Message, RunConfig
 from infra.memory import MemoryStore
 from infra.session import SessionStore, SessionRecord
 from infra.user_profile import UserProfileStore
+from platforms.feishu.contacts import ContactStore
 from platforms.feishu.dispatcher import FeishuDispatcher
 from platforms.feishu.media import MediaHandler
 from platforms.feishu.tags import wrap_user_input, inject_notifications, parse_output
@@ -131,6 +132,7 @@ class FeishuAdapter:
         self._context_mgr = context_manager
         self._media: MediaHandler | None = None
         self._feishu_api: Any = None  # set by set_media_handler
+        self._contacts = ContactStore()
 
         self._pending: dict[str, PendingBatch] = {}
         self._seen_ids: dict[str, float] = {}  # message_id → timestamp
@@ -141,6 +143,8 @@ class FeishuAdapter:
         """Set the media handler for processing images/files/audio."""
         self._media = media
         self._feishu_api = api
+        if api:
+            self._contacts.set_api(api)
 
     # ── Lifecycle ──────────────────────────────────────────────────
 
@@ -275,6 +279,18 @@ class FeishuAdapter:
             self._seen_ids[message_id] = now
             self._clean_dedup(now)
 
+            # Auto-learn sender identity (async, fire-and-forget)
+            if sender_id:
+                try:
+                    loop = asyncio.get_event_loop()
+                    loop.call_soon_threadsafe(
+                        lambda sid=sender_id: asyncio.ensure_future(
+                            self._contacts.auto_learn(sid)
+                        )
+                    )
+                except Exception:
+                    pass
+
             # Extract content based on message type
             msg_type = msg.message_type
             content = json.loads(msg.content or "{}")
@@ -318,10 +334,12 @@ class FeishuAdapter:
         """Add message to debounce buffer, reset timer."""
         batch = self._pending.get(key)
         if batch is None:
+            sender_name = self._contacts.resolve_id(sender_id) or ""
             batch = PendingBatch(
                 chat_id=chat_id,
                 chat_type=chat_type,
                 sender_id=sender_id,
+                sender_name=sender_name,
                 first_message_id=message_id,
             )
             self._pending[key] = batch

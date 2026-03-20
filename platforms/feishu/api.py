@@ -174,9 +174,12 @@ class FeishuAPI:
                     try:
                         decoder = _json.JSONDecoder()
                         parsed, _ = decoder.raw_decode(text)
-                        data = parsed if isinstance(parsed, dict) else {"code": 0, "data": parsed}
+                        data = parsed if isinstance(parsed, dict) else {"code": resp.status_code, "data": parsed, "msg": "non-dict response"}
                     except _json.JSONDecodeError:
-                        data = {"code": -1, "msg": f"Unparseable response: {text[:200]}"}
+                        data = {"code": resp.status_code or -1, "msg": f"Unparseable response: {text[:200]}"}
+                # HTTP error without API-level error code → synthesize one
+                if resp.status_code >= 400 and data.get("code") == 0:
+                    data["code"] = resp.status_code
             except httpx.HTTPError as exc:
                 last_exc = exc
                 if attempt < 2:
@@ -1005,9 +1008,7 @@ class FeishuAPI:
             "time_max": _to_timestamp(end_time),
         }
         if user_ids:
-            # API accepts a single user_id per request; batch by calling multiple
-            # For simplicity, query first user_id if provided
-            body["user_id"] = {"user_id": user_ids[0], "id_type": "open_id"}
+            body["user_id"] = user_ids[0]
 
         # Try SDK first
         try:
@@ -1052,6 +1053,7 @@ class FeishuAPI:
             "POST",
             "/open-apis/calendar/v4/freebusy/list",
             body=body,
+            params={"user_id_type": "open_id"} if user_ids else None,
         )
         if data.get("code") != 0:
             return {"error": f"{data.get('code')}: {data.get('msg')}"}

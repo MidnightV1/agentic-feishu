@@ -549,7 +549,7 @@ class FeishuAdapter:
 
             tool_trace: list[str] = []  # accumulated tool call trace
 
-            async def on_tool_start(name: str, **_kw) -> None:
+            async def on_tool_start(name: str, arguments=None) -> None:
                 last_activity[0] = time.monotonic()
                 if thinking_id and not streaming_started:
                     tool_trace.append(f"🔧 {name}…")
@@ -557,7 +557,7 @@ class FeishuAdapter:
                         thinking_id, "\n".join(tool_trace)
                     )
 
-            async def on_tool_end(name: str, result=None, **_kw) -> None:
+            async def on_tool_end(name: str, result=None) -> None:
                 last_activity[0] = time.monotonic()
                 if thinking_id and not streaming_started and tool_trace:
                     # Update last entry with result status

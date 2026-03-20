@@ -861,31 +861,44 @@ class FeishuAPI:
                     CreateCalendarEventAttendeeRequestBody,
                     CalendarEventAttendee,
                 )
-                attendee_list = [
-                    CalendarEventAttendee.builder()
-                    .type("user")
-                    .user_id(uid)
-                    .build()
-                    for uid in attendees
-                ]
-                att_req = (
-                    CreateCalendarEventAttendeeRequest.builder()
-                    .calendar_id(cal_id)
-                    .event_id(event_id)
-                    .user_id_type("open_id")
-                    .request_body(
-                        CreateCalendarEventAttendeeRequestBody.builder()
-                        .attendees(attendee_list)
+                # Normalize: accept both ["ou_xxx"] and [{"user_id": "ou_xxx"}]
+                normalized: list[str] = []
+                for item in attendees:
+                    if isinstance(item, str):
+                        normalized.append(item)
+                    elif isinstance(item, dict):
+                        uid = item.get("user_id") or item.get("open_id") or item.get("id", "")
+                        if uid:
+                            normalized.append(uid)
+                if not normalized:
+                    log.warning("attendees provided but no valid open_ids extracted: %s", attendees)
+                    result["attendees_error"] = "no valid open_ids in attendees"
+                else:
+                    attendee_list = [
+                        CalendarEventAttendee.builder()
+                        .type("user")
+                        .user_id(uid)
+                        .build()
+                        for uid in normalized
+                    ]
+                    att_req = (
+                        CreateCalendarEventAttendeeRequest.builder()
+                        .calendar_id(cal_id)
+                        .event_id(event_id)
+                        .user_id_type("open_id")
+                        .request_body(
+                            CreateCalendarEventAttendeeRequestBody.builder()
+                            .attendees(attendee_list)
+                            .build()
+                        )
                         .build()
                     )
-                    .build()
-                )
-                att_resp = await client.calendar.v4.calendar_event_attendee.acreate(att_req)
-                if not att_resp.success():
-                    log.warning("add_attendees failed: %s %s", att_resp.code, att_resp.msg)
-                    result["attendees_error"] = f"{att_resp.code}: {att_resp.msg}"
-                else:
-                    result["attendees_added"] = len(attendees)
+                    att_resp = await client.calendar.v4.calendar_event_attendee.acreate(att_req)
+                    if not att_resp.success():
+                        log.warning("add_attendees failed: %s %s", att_resp.code, att_resp.msg)
+                        result["attendees_error"] = f"{att_resp.code}: {att_resp.msg}"
+                    else:
+                        result["attendees_added"] = len(normalized)
 
             return result
         except Exception as e:

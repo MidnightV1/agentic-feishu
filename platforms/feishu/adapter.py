@@ -370,6 +370,48 @@ class FeishuAdapter:
 
         return "\n\n".join(parts)
 
+    # ── # Command handling ──────────────────────────────────────
+
+    async def _handle_command(
+        self,
+        text: str,
+        chat_id: str,
+        sender_id: str,
+        reply_to: str,
+        session_key: str,
+    ) -> None:
+        """Handle # commands without invoking the LLM."""
+        cmd = text.split()[0].lower()
+
+        if cmd == "#reset":
+            await self._sessions.delete(session_key)
+            await self._dispatcher.send_card(
+                chat_id,
+                "{{card:header=会话已重置,color=green}}\n下条消息开始全新对话。",
+                reply_to,
+            )
+
+        elif cmd == "#usage":
+            session_cost = self._usage.session_total(session_key)
+            daily = self._usage.daily_summary()
+            models = ", ".join(daily.get("models", [])) or "—"
+            msg = (
+                "{{card:header=用量统计,color=blue}}\n"
+                f"**本轮对话**: ${session_cost:.4f}\n"
+                f"**今日总计**: ${daily['cost_usd']:.4f}（{daily['requests']} 次请求）\n"
+                f"**Tokens**: {daily.get('input_tokens', 0):,} input / "
+                f"{daily.get('output_tokens', 0):,} output\n"
+                f"**模型**: {models}"
+            )
+            await self._dispatcher.send_card(chat_id, msg, reply_to)
+
+        else:
+            await self._dispatcher.send_card(
+                chat_id,
+                f"未知命令 `{cmd}`。可用命令：`#reset` `#usage`",
+                reply_to,
+            )
+
     # ── Agent loop integration ────────────────────────────────────
 
     async def _process_message(
@@ -383,6 +425,13 @@ class FeishuAdapter:
     ) -> None:
         """Wrap input → thinking card → run agent loop → parse output → route responses."""
         session_key = f"feishu:{chat_id}:{sender_id}"
+
+        # ── # Command interception ──
+        stripped = text.strip()
+        if stripped.startswith("#"):
+            await self._handle_command(stripped, chat_id, sender_id, reply_to, session_key)
+            return
+
         thinking_id: str | None = None
         pulse_task: asyncio.Task | None = None
 

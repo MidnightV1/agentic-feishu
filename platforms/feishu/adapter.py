@@ -632,13 +632,6 @@ class FeishuAdapter:
 
             async def on_tool_end(name: str, result=None) -> None:
                 last_activity[0] = time.monotonic()
-                if thinking_id and tool_trace:
-                    is_err = result and getattr(result, "is_error", False)
-                    # Keep the easter egg label, just append status marker
-                    tool_trace[-1] = tool_trace[-1] + (" ❌" if is_err else " ✓")
-                    await self._dispatcher.update_card(
-                        thinking_id, "\n".join(tool_trace)
-                    )
 
             async def on_turn_start(turn: int = 0) -> None:
                 """Reset state at the start of each LLM call."""

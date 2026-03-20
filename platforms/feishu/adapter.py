@@ -58,6 +58,87 @@ _LONG_THINKING = [
     "正在向赛博佛祖祈祷...", "道生一，一生二，二生 bug...",
 ]
 
+# ── Tool activity labels ─────────────────────────────────────
+# Personality-driven progress labels for tool use display.
+
+_TOOL_VERBS: dict[str, list[str]] = {
+    "search": ["翻箱倒柜中", "正在搜索", "搜刮中", "大海捞针..."],
+    "read": ["翻阅中", "正在读", "啃文档中", "细品中..."],
+    "create": ["创作中", "无中生有...", "正在编织", "变出来了..."],
+    "update": ["雕花中", "修改中", "外科手术中...", "填坑中..."],
+    "delete": ["销毁中", "抹除中...", "正在毁尸灭迹"],
+    "list": ["盘点中", "正在清点", "翻抽屉中..."],
+    "send": ["投递中", "飞鸽传书...", "正在发射"],
+    "bash": ["搞事中...", "正在鞭策主机", "按下了不该按的按钮..."],
+    "web": ["网上冲浪中", "正在请教互联网", "百度一下（才怪"],
+    "calendar": ["翻日历中", "掐指一算...", "查黄历中..."],
+    "task": ["立 flag 中...", "写入小本本...", "先给自己画个饼"],
+    "drive": ["翻云盘中", "正在找文件", "整理收纳中..."],
+    "bitable": ["查表中", "翻账本...", "数据挖掘中..."],
+    "perm": ["发通行证中", "门禁操作...", "授权中..."],
+}
+
+_TOOL_ICONS: dict[str, str] = {
+    "search": "🔍", "read": "📖", "create": "📝", "update": "✏️",
+    "delete": "🗑️", "list": "📂", "send": "📮", "bash": "⚡",
+    "web": "🌐", "calendar": "📅", "task": "📋", "drive": "💾",
+    "bitable": "📊", "perm": "🔐",
+}
+
+_FALLBACK_VERBS = ["搞事情中...", "施法中...", "炼丹中...", "整活中...", "正在变形..."]
+_FALLBACK_ICON = "🔧"
+
+# Tool name → category mapping
+_TOOL_CATEGORY: dict[str, str] = {
+    "search_documents": "search", "search_drive": "search", "web_search": "web",
+    "read_document": "read", "read_file": "read",
+    "create_document": "create", "create_event": "calendar", "create_task": "task",
+    "create_section": "create", "create_drive_folder": "drive",
+    "update_document": "update", "update_event": "calendar", "update_task": "task",
+    "update_bitable_record": "bitable", "replace_section": "update",
+    "delete_event": "delete", "delete_task": "delete",
+    "delete_bitable_record": "bitable",
+    "list_events": "calendar", "list_tasks": "task", "list_comments": "read",
+    "list_sections": "list", "list_drive_files": "drive", "list_folder": "drive",
+    "list_bitable_tables": "bitable",
+    "query_bitable_records": "bitable", "add_bitable_record": "bitable",
+    "send_message": "send", "reply_comment": "send",
+    "append_document": "update", "transfer_document_owner": "perm",
+    "add_collaborator": "perm", "remove_collaborator": "perm",
+    "set_public_sharing": "perm",
+    "assign_task": "task", "unassign_task": "task", "complete_task": "task",
+    "task_snapshot": "task",
+    "freebusy": "calendar", "move_drive_file": "drive",
+    "bash": "bash", "list_directory": "list",
+}
+
+
+def _make_tool_label(tool_name: str, arguments: dict | None = None) -> str:
+    """Generate a personality-driven progress label for a tool call."""
+    cat = _TOOL_CATEGORY.get(tool_name, "")
+    if not cat:
+        # Guess category from tool name prefix
+        for prefix in ("search", "read", "create", "update", "delete", "list", "send"):
+            if tool_name.startswith(prefix):
+                cat = prefix
+                break
+    verbs = _TOOL_VERBS.get(cat, _FALLBACK_VERBS)
+    icon = _TOOL_ICONS.get(cat, _FALLBACK_ICON)
+    verb = random.choice(verbs)
+
+    # Add context from arguments
+    detail = ""
+    if arguments:
+        detail = (arguments.get("query") or arguments.get("summary")
+                  or arguments.get("title") or arguments.get("document_id")
+                  or arguments.get("command") or "")
+        if detail and len(detail) > 25:
+            detail = detail[:22] + "…"
+
+    if detail:
+        return f"{icon} {verb}「{detail}」"
+    return f"{icon} {verb}"
+
 
 def _idle_label(elapsed: float) -> str:
     """Pick a random easter egg based on elapsed time."""
@@ -552,7 +633,8 @@ class FeishuAdapter:
                     in_tool_phase[0] = True
                     tool_trace.clear()
                     stream_buf.clear()
-                tool_trace.append(f"🔧 {name}…")
+                label = _make_tool_label(name, arguments if isinstance(arguments, dict) else None)
+                tool_trace.append(label)
                 if thinking_id:
                     await self._dispatcher.update_card(
                         thinking_id, "\n".join(tool_trace)
@@ -561,9 +643,11 @@ class FeishuAdapter:
             async def on_tool_end(name: str, result=None) -> None:
                 last_activity[0] = time.monotonic()
                 if thinking_id and tool_trace:
-                    # Update last entry with result status
                     is_err = result and getattr(result, "is_error", False)
-                    tool_trace[-1] = f"🔧 {name} {'❌' if is_err else '✓'}"
+                    # Replace trailing verb with done marker
+                    cat = _TOOL_CATEGORY.get(name, "")
+                    icon = _TOOL_ICONS.get(cat, _FALLBACK_ICON)
+                    tool_trace[-1] = f"{icon} {name} {'❌' if is_err else '✓'}"
                     await self._dispatcher.update_card(
                         thinking_id, "\n".join(tool_trace)
                     )

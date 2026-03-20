@@ -74,7 +74,7 @@ async def set_public_sharing(
 
     Args:
         doc_token: Document token
-        link_share_entity: "anyone_readable", "anyone_editable", "tenant_readable", "tenant_editable", "off"
+        link_share_entity: "anyone_readable", "anyone_editable", "tenant_readable", "tenant_editable", "closed" (to disable sharing)
         doc_type: Document type
     """
     api = _require_api()

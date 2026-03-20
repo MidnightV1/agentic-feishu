@@ -165,7 +165,14 @@ class FeishuAPI:
             headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
             try:
                 resp = await self._http.request(method, url, json=body, params=params, headers=headers)
-                data = resp.json()
+                try:
+                    data = resp.json()
+                except ValueError:
+                    # Some APIs return non-standard JSON (extra data, etc.)
+                    import json as _json
+                    text = resp.text.strip()
+                    decoder = _json.JSONDecoder()
+                    data, _ = decoder.raw_decode(text)
             except httpx.HTTPError as exc:
                 last_exc = exc
                 if attempt < 2:
@@ -996,7 +1003,7 @@ class FeishuAPI:
         if user_ids:
             # API accepts a single user_id per request; batch by calling multiple
             # For simplicity, query first user_id if provided
-            body["user_id"] = {"open_id": user_ids[0]}
+            body["user_id"] = {"user_id": user_ids[0], "id_type": "open_id"}
 
         # Try SDK first
         try:
@@ -1462,13 +1469,11 @@ class FeishuAPI:
         except Exception as e:
             return [{"error": str(e)}]
 
-    async def create_drive_folder(self, name: str, parent_token: str = "") -> dict:
-        """Create a folder in Drive."""
+    async def create_drive_folder(self, name: str, parent_token: str) -> dict:
+        """Create a folder in Drive. parent_token is required."""
         token = await self._get_tenant_token()
         url = f"{self.domain}/open-apis/drive/v1/files/create_folder"
-        body: dict[str, Any] = {"name": name}
-        if parent_token:
-            body["folder_token"] = parent_token
+        body: dict[str, Any] = {"name": name, "folder_token": parent_token}
         try:
             async with httpx.AsyncClient() as http:
                 resp = await http.post(

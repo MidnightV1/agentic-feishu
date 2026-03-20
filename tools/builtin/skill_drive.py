@@ -26,7 +26,7 @@ def _require_api() -> Any:
 
 
 @tool(
-    summary="Feishu Drive operations: list, search, create_folder, move",
+    summary="Feishu Drive operations: list, search, create_folder, move, delete",
     deferred=True,
     description="""Feishu Drive operations.
 
@@ -35,6 +35,7 @@ Actions:
 - search: Search files. params: {query, count?=10}
 - create_folder: Create folder. params: {name, parent_token} (parent_token REQUIRED)
 - move: Move file/folder. params: {file_token, target_folder_token}
+- delete: Delete file/folder (moves to trash, recoverable 30 days). params: {file_token, file_type?="docx"}. file_type: docx, sheet, bitable, mindnote, file, folder. IRREVERSIBLE after trash period — confirm with user first.
 """, parallel_safe=False,
 )
 async def feishu_drive(action: str, params: dict = {}) -> dict | list:
@@ -65,6 +66,11 @@ async def feishu_drive(action: str, params: dict = {}) -> dict | list:
         file_token = params.get("file_token", "")
         target_folder_token = params.get("target_folder_token", "")
         return await api.move_drive_file(file_token, target_folder_token)
+
+    elif action == "delete":
+        file_token = params.get("file_token", "")
+        file_type = params.get("file_type", "docx")
+        return await api.delete_drive_file(file_token, file_type)
 
     else:
         return {"error": f"Unknown action: {action}"}

@@ -1546,6 +1546,28 @@ class FeishuAPI:
         except Exception as e:
             return {"error": str(e)}
 
+    async def delete_drive_file(
+        self, file_token: str, file_type: str = "docx",
+    ) -> dict:
+        """Delete a file from Drive (moves to trash, recoverable within 30 days).
+
+        file_type: docx, sheet, bitable, mindnote, file, folder, etc.
+        """
+        token = await self._get_tenant_token()
+        url = f"{self.domain}/open-apis/drive/v1/files/{file_token}"
+        try:
+            async with httpx.AsyncClient() as http:
+                resp = await http.delete(
+                    url, headers={"Authorization": f"Bearer {token}"},
+                    params={"type": file_type}, timeout=30,
+                )
+                data = resp.json()
+                if data.get("code") != 0:
+                    return {"error": f"{data.get('code')}: {data.get('msg')}"}
+                return {"ok": True, "task_id": data.get("data", {}).get("task_id", "")}
+        except Exception as e:
+            return {"error": str(e)}
+
     # ── Permission ─────────────────────────────────────────────────
 
     async def list_collaborators(

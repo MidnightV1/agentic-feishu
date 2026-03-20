@@ -684,6 +684,12 @@ class FeishuAdapter:
             # ── Route: reply → user ──
             reply_text = parsed.reply_text
 
+            # ── Fallback: empty content after tool use → summarize ──
+            if not reply_text and result.turn_count > 1:
+                reply_text = await self._summarize_tool_work(result)
+                if reply_text:
+                    log.info("Empty content fallback: generated summary from %d turns", result.turn_count)
+
             # Long content → auto-convert to Feishu doc
             doc_redirect = await self._maybe_convert_to_doc(reply_text, chat_id)
             if doc_redirect:
@@ -783,6 +789,47 @@ class FeishuAdapter:
 
         if result:
             await self._buffer_message(key, result, chat_id, chat_type, sender_id, message_id)
+
+    # ── Empty-content fallback: summarize tool work ─────────────────
+
+    async def _summarize_tool_work(self, result) -> str | None:
+        """When model returns empty content after tool use, make a
+        lightweight call to summarize what was done."""
+        from core.types import Message as _Msg
+
+        # Collect tool call/result pairs from messages
+        tool_log: list[str] = []
+        for msg in result.messages:
+            if msg.role == "assistant" and msg.tool_calls:
+                for tc in msg.tool_calls:
+                    args_preview = str(tc.arguments)[:100]
+                    tool_log.append(f"- called `{tc.name}({args_preview})`")
+            elif msg.role == "tool":
+                content_preview = (msg.content or "")[:200]
+                tool_log.append(f"  → result: {content_preview}")
+
+        if not tool_log:
+            return None
+
+        summary_prompt = (
+            "你刚刚执行了以下工具调用来完成用户的请求，但最终回复为空。"
+            "请根据工具调用记录，用简洁的中文总结你完成了什么工作、结果如何。"
+            "直接回复总结内容，不需要标签。\n\n"
+            + "\n".join(tool_log[-30:])  # cap to last 30 lines
+        )
+
+        try:
+            summary_result = await self._loop.run(
+                prompt=summary_prompt,
+                config=self._run_config,
+                system_prompt="你是一个简洁的工作汇报助手。根据工具调用记录总结完成了什么。",
+                messages=[],
+                callbacks=None,
+            )
+            return summary_result.text.strip() or None
+        except Exception as e:
+            log.warning("Fallback summary failed: %s", e)
+            return None
 
     # ── Long content → document ────────────────────────────────────
 

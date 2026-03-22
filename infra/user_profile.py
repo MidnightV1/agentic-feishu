@@ -71,7 +71,15 @@ class UserProfileStore:
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
     def _path(self, user_id: str) -> Path:
-        return self.base_dir / f"{user_id}.md"
+        d = self.base_dir / user_id
+        d.mkdir(parents=True, exist_ok=True)
+        new_path = d / "profile.md"
+        # Migration: move old flat file to new nested path
+        old_path = self.base_dir / f"{user_id}.md"
+        if old_path.exists() and not new_path.exists():
+            import shutil
+            shutil.move(str(old_path), str(new_path))
+        return new_path
 
     def load(self, user_id: str) -> str:
         """Load user profile. Returns default template if not found."""

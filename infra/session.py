@@ -16,6 +16,7 @@ log = logging.getLogger("agentic.session")
 _CREATE_TABLES = """
 CREATE TABLE IF NOT EXISTS sessions (
     session_key TEXT PRIMARY KEY,
+    bot_id TEXT NOT NULL DEFAULT 'main',
     provider TEXT NOT NULL,
     model TEXT NOT NULL,
     created_at REAL NOT NULL,
@@ -36,12 +37,14 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_key, created_at);
+CREATE INDEX IF NOT EXISTS idx_sessions_bot ON sessions(bot_id);
 """
 
 
 @dataclass
 class SessionRecord:
     session_key: str
+    bot_id: str = "main"
     provider: str
     model: str
     created_at: float = 0.0
@@ -98,6 +101,7 @@ class SessionStore:
                 return None
             return SessionRecord(
                 session_key=row["session_key"],
+                bot_id=row["bot_id"] if "bot_id" in row.keys() else "main",
                 provider=row["provider"],
                 model=row["model"],
                 created_at=row["created_at"],
@@ -113,10 +117,11 @@ class SessionStore:
         await self.db.execute(
             """
             INSERT INTO sessions
-                (session_key, provider, model, created_at, updated_at,
+                (session_key, bot_id, provider, model, created_at, updated_at,
                  message_count, total_cost_usd, metadata_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(session_key) DO UPDATE SET
+                bot_id = excluded.bot_id,
                 provider = excluded.provider,
                 model = excluded.model,
                 updated_at = excluded.updated_at,
@@ -126,6 +131,7 @@ class SessionStore:
             """,
             (
                 record.session_key,
+                record.bot_id,
                 record.provider,
                 record.model,
                 record.created_at,

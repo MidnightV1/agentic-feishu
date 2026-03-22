@@ -25,6 +25,17 @@ class FeishuConfig(BaseModel):
     notification_bot_app_secret: str = ""
 
 
+class BotConfig(BaseModel):
+    """Per-bot configuration."""
+    name: str = "main"
+    app_id: str = ""
+    app_secret: str = ""
+    provider: str = ""          # override default_provider
+    model: str = ""             # override provider default
+    default_persona: str = "default"  # template name
+    encrypt_key: str = ""
+
+
 class Settings(BaseModel):
     # Providers — defaults auto-resolved from presets.py at factory level.
     # Users only need to set api_key (and optionally model) in config.yaml.
@@ -45,8 +56,11 @@ class Settings(BaseModel):
     # Default provider for main conversation
     default_provider: str = "anthropic"
 
-    # Feishu
+    # Feishu (legacy single-bot)
     feishu: FeishuConfig = FeishuConfig()
+
+    # Multi-bot (preferred over feishu when present)
+    bots: list[BotConfig] = []
 
     # Agent loop
     max_turns: int = 50

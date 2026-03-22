@@ -10,14 +10,18 @@ import signal
 import sys
 from pathlib import Path
 
-from config.settings import load_settings
+from config.settings import load_settings, BotConfig
 from core.agent_loop import AgentLoop
-from core.context_manager import ContextComponent, ContextConfig, ContextManager
+from core.context_manager import ContextConfig, ContextManager
+from core.context_assembler import ContextAssembler
 from core.tool_registry import ToolRegistry
 from core.types import RunConfig
 from infra.jsonl_store import JSONLStore
+from infra.bot_context import BotContext
 from infra.memory import MemoryStore
+from infra.org_context import OrgContext
 from infra.session import SessionStore
+from infra.user_bot_relation import UserBotRelation
 from infra.user_profile import UserProfileStore
 from jobs.explorer import ExploreQueue
 from jobs.heartbeat import HeartbeatMonitor
@@ -133,49 +137,23 @@ async def main() -> None:
         stream=settings.stream_output,
     )
 
-    # ── System prompt (assembled from components) ────────────────
-    # Static components (same for all users/sessions)
-    soul_text = _load_template("soul.md")
-    agent_text = _load_template(f"{settings.persona}.md", subdir="agents")
-    if not agent_text:
-        # Fallback to old personas/ directory
-        agent_text = _load_template(f"{settings.persona}.md", subdir="personas")
-    skill_descriptions = skill_registry.build_descriptions()
+    # ── Org context ────────────────────────────────────────────────
+    org_context = OrgContext(os.path.join(settings.data_dir, "org"))
 
-    # Tool usage guidelines (slimmed — core rules now in tool descriptions)
+    # ── Per-user stores (shared across bots) ──────────────────────
+    user_profile_store = UserProfileStore(os.path.join(settings.data_dir, "users"))
+    user_bot_relation = UserBotRelation(os.path.join(settings.data_dir, "users"))
+
+    # ── Tool guidelines + skill descriptions ──────────────────────
     guidelines_path = Path(__file__).parent / "templates" / "tool_guidelines.md"
     tool_guidelines = guidelines_path.read_text(encoding="utf-8") if guidelines_path.exists() else ""
+    skill_descriptions = skill_registry.build_descriptions()
 
-    base_components = [
-        ContextComponent(type="soul", content=soul_text, priority=100),
-        ContextComponent(type="agent", content=agent_text, priority=90),
-        ContextComponent(type="platform_rules", content=FEISHU_SYSTEM_PROMPT, priority=85),
-        ContextComponent(type="tool_guidelines", content=tool_guidelines, priority=75),
-    ]
-    if skill_descriptions:
-        base_components.append(
-            ContextComponent(type="skill_descriptions", content=skill_descriptions, priority=70)
-        )
-
-    # Build base system prompt (without per-user components)
-    system_prompt = await context_mgr.build_system_prompt(base_components)
-
-    # ── Per-user stores ────────────────────────────────────────────
-    memory_store = MemoryStore(os.path.join(settings.data_dir, "memory"))
-    user_profile_store = UserProfileStore(os.path.join(settings.data_dir, "users"))
-
-    # ── Session store ─────────────────────────────────────────────
+    # ── Session store (shared, bot_id column for isolation) ──────
     session_store = SessionStore(
         db_path=os.path.join(settings.data_dir, "sessions.db")
     )
     await session_store.init()
-
-    # ── Dispatcher ────────────────────────────────────────────────
-    dispatcher = FeishuDispatcher(
-        app_id=settings.feishu.app_id,
-        app_secret=settings.feishu.app_secret,
-    )
-    await dispatcher.start()
 
     # ── Usage tracker ────────────────────────────────────────────
     from infra.usage import UsageTracker
@@ -188,36 +166,97 @@ async def main() -> None:
     explore_queue = ExploreQueue(os.path.join(settings.data_dir, "explore.jsonl"))
 
     async def _on_explore(hints: str) -> None:
-        """Process explore hints from LLM output."""
         count = explore_queue.add_from_hints(hints)
         if count:
             log.info("Added %d explore items from LLM hints", count)
 
-    # ── Media handler ─────────────────────────────────────────────
-    media_handler = MediaHandler(api=feishu_api, data_dir=settings.data_dir)
-
-    # ── Provider factory for per-session model switching ──────────
+    # ── Provider factory ──────────────────────────────────────────
     def _provider_factory(name: str):
         return create_provider(settings, name)
 
-    # ── Feishu adapter ────────────────────────────────────────────
-    adapter = FeishuAdapter(
-        app_id=settings.feishu.app_id,
-        app_secret=settings.feishu.app_secret,
-        agent_loop=agent_loop,
-        dispatcher=dispatcher,
-        session_store=session_store,
-        run_config=run_config,
-        system_prompt=system_prompt,
-        on_explore=_on_explore,
-        memory_store=memory_store,
-        user_profile_store=user_profile_store,
-        context_manager=context_mgr,
-        provider_factory=_provider_factory,
-        scheduler=scheduler,
-    )
-    adapter.set_media_handler(media_handler, feishu_api)
-    await adapter.start()
+    # ── Build bot configs (multi-bot or legacy single-bot) ────────
+    bot_configs: list[BotConfig] = list(settings.bots)
+    if not bot_configs:
+        # Legacy: single bot from feishu config
+        bot_configs = [BotConfig(
+            name="main",
+            app_id=settings.feishu.app_id,
+            app_secret=settings.feishu.app_secret,
+        )]
+
+    # ── Start each bot ────────────────────────────────────────────
+    adapters: list[FeishuAdapter] = []
+
+    for bot_cfg in bot_configs:
+        bot_name = bot_cfg.name
+        log.info("Starting bot: %s (app_id=%s…)", bot_name, bot_cfg.app_id[:8] if bot_cfg.app_id else "?")
+
+        # Per-bot context
+        bot_context = BotContext(bot_name, os.path.join(settings.data_dir, "bots"))
+
+        # Per-bot run config (provider/model override)
+        bot_provider = bot_cfg.provider or settings.default_provider
+        bot_model = bot_cfg.model or getattr(getattr(settings, bot_provider, None), "model", "")
+        bot_run_config = RunConfig(
+            model=bot_model,
+            provider=bot_provider,
+            max_turns=settings.max_turns,
+            max_budget_usd=settings.max_budget_usd,
+            temperature=settings.temperature,
+            stream=settings.stream_output,
+        )
+
+        # Per-bot provider + agent loop
+        bot_provider_instance = create_provider(settings, bot_provider)
+        bot_agent_loop = AgentLoop(bot_provider_instance, registry, context_mgr)
+
+        # Per-bot dispatcher
+        bot_dispatcher = FeishuDispatcher(
+            app_id=bot_cfg.app_id,
+            app_secret=bot_cfg.app_secret,
+        )
+        await bot_dispatcher.start()
+
+        # Per-bot media handler
+        bot_feishu_api = FeishuAPI(app_id=bot_cfg.app_id, app_secret=bot_cfg.app_secret)
+        await bot_feishu_api.start()
+        bot_media = MediaHandler(api=bot_feishu_api, data_dir=settings.data_dir)
+
+        # Context assembler (pulls from all layers)
+        assembler = ContextAssembler(
+            org=org_context,
+            bot=bot_context,
+            relation=user_bot_relation,
+            user_profile=user_profile_store,
+            session_store=session_store,
+            context_manager=context_mgr,
+            platform_prompt=FEISHU_SYSTEM_PROMPT,
+            tool_guidelines=tool_guidelines,
+            skill_descriptions=skill_descriptions,
+        )
+
+        # Adapter
+        adapter = FeishuAdapter(
+            app_id=bot_cfg.app_id,
+            app_secret=bot_cfg.app_secret,
+            agent_loop=bot_agent_loop,
+            dispatcher=bot_dispatcher,
+            session_store=session_store,
+            run_config=bot_run_config,
+            bot_name=bot_name,
+            context_assembler=assembler,
+            on_explore=_on_explore,
+            user_bot_relation=user_bot_relation,
+            user_profile_store=user_profile_store,
+            context_manager=context_mgr,
+            provider_factory=_provider_factory,
+            scheduler=scheduler,
+        )
+        adapter.set_media_handler(bot_media, bot_feishu_api)
+        await adapter.start()
+        adapters.append(adapter)
+
+    log.info("All %d bot(s) started", len(adapters))
 
     # ── Heartbeat + Scheduler ─────────────────────────────────────
     heartbeat = HeartbeatMonitor(
@@ -233,7 +272,7 @@ async def main() -> None:
     ))
     await scheduler.start()
 
-    log.info("agentic-feishu ready — listening for messages")
+    log.info("agentic-feishu ready — %d bot(s) listening", len(adapters))
 
     # ── Keep alive ────────────────────────────────────────────────
     stop_event = asyncio.Event()
@@ -251,7 +290,8 @@ async def main() -> None:
     finally:
         log.info("Shutting down...")
         await scheduler.stop()
-        await adapter.stop()
+        for adapter in adapters:
+            await adapter.stop()
         await dispatcher.stop()
         await feishu_api.stop()
         await session_store.close()

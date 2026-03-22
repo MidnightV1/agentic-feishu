@@ -21,10 +21,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from core.agent_loop import AgentLoop
-from core.context_manager import ContextComponent, ContextManager, build_recovery_context
+from core.context_manager import ContextManager
 from core.types import Callbacks, Message, RunConfig
-from infra.memory import MemoryStore
 from infra.session import SessionStore, SessionRecord
+from infra.user_bot_relation import UserBotRelation
 from infra.user_profile import UserProfileStore
 from platforms.feishu.contacts import ContactStore
 from platforms.feishu.dispatcher import FeishuDispatcher
@@ -209,16 +209,17 @@ class FeishuAdapter:
         dispatcher: FeishuDispatcher,
         session_store: SessionStore,
         run_config: RunConfig,
-        system_prompt: str = "",
+        bot_name: str = "main",
+        context_assembler: Any = None,  # core.context_assembler.ContextAssembler
         domain: str = "https://open.feishu.cn",
-        usage_tracker: Any = None,  # infra.usage.UsageTracker (optional)
-        on_explore: Any = None,    # async callback(hints: str) for explore processing
-        on_task_plan: Any = None,  # async callback(plan_json: str, chat_id: str) for orchestration
-        memory_store: MemoryStore | None = None,
+        usage_tracker: Any = None,
+        on_explore: Any = None,
+        on_task_plan: Any = None,
+        user_bot_relation: UserBotRelation | None = None,
         user_profile_store: UserProfileStore | None = None,
         context_manager: ContextManager | None = None,
-        provider_factory: Any = None,  # async/sync callable(name: str) -> BaseProvider
-        scheduler: Any = None,  # jobs.scheduler.Scheduler (for #jobs command)
+        provider_factory: Any = None,
+        scheduler: Any = None,
     ):
         self.app_id = app_id
         self.app_secret = app_secret
@@ -228,10 +229,11 @@ class FeishuAdapter:
         self._usage = usage_tracker
         self._sessions = session_store
         self._run_config = run_config
-        self._system_prompt = system_prompt
+        self._bot_name = bot_name
+        self._assembler = context_assembler
         self._on_explore = on_explore
         self._on_task_plan = on_task_plan
-        self._memory = memory_store
+        self._relation = user_bot_relation
         self._user_profile = user_profile_store
         self._context_mgr = context_manager
         self._media: MediaHandler | None = None
@@ -435,7 +437,7 @@ class FeishuAdapter:
                 return
 
             # Track message → session for recall handling
-            session_key = f"feishu:{chat_id}:{sender_id}"
+            session_key = f"{self._bot_name}:{chat_id}:{sender_id}"
             self._msg_to_session[message_id] = session_key
 
             if msg_type == "text":
@@ -514,22 +516,6 @@ class FeishuAdapter:
         )
 
     # ── Per-user context ─────────────────────────────────────────
-
-    def _build_user_context(self, sender_id: str) -> str:
-        """Build per-user context (profile + memory) to append to system prompt."""
-        parts: list[str] = []
-
-        if self._user_profile:
-            profile = self._user_profile.build_context(sender_id)
-            if profile:
-                parts.append(profile)
-
-        if self._memory:
-            memory = self._memory.build_context(sender_id)
-            if memory:
-                parts.append(memory)
-
-        return "\n\n".join(parts)
 
     # ── # Command handling ──────────────────────────────────────
 
@@ -657,7 +643,7 @@ class FeishuAdapter:
         reply_to: str,
     ) -> None:
         """Wrap input → thinking card → run agent loop → parse output → route responses."""
-        session_key = f"feishu:{chat_id}:{sender_id}"
+        session_key = f"{self._bot_name}:{chat_id}:{sender_id}"
 
         # ── Per-session model override ──
         override = self._session_overrides.get(session_key)
@@ -690,38 +676,30 @@ class FeishuAdapter:
             session = await self._sessions.get(session_key)
             history_msgs: list[Message] = []
 
-            # Build effective system prompt with per-user context
-            user_context = self._build_user_context(sender_id)
-            effective_system = (
-                f"{self._system_prompt}\n\n{user_context}"
-                if user_context else self._system_prompt
-            )
+            is_new_session = session is None
 
             if session:
                 raw = await self._sessions.get_messages(session_key, limit=50)
                 for m in raw:
                     history_msgs.append(Message(role=m["role"], content=m["content"]))
             else:
-                # New session — check for prior chat history (recovery scenario)
-                recovery = await build_recovery_context(
-                    self._sessions, session_key,
-                )
-                if recovery:
-                    # Inject recovery context into system prompt for this run
-                    effective_system = (
-                        f"{self._system_prompt}\n\n{recovery.content}"
-                        if self._system_prompt
-                        else recovery.content
-                    )
-                    log.info("Session recovery: injected %d chars for %s",
-                             len(recovery.content), session_key)
-
                 session = SessionRecord(
                     session_key=session_key,
+                    bot_id=self._bot_name,
                     provider=effective_config.provider,
                     model=effective_config.model,
                 )
                 await self._sessions.save(session)
+
+            # Build system prompt from all context layers via assembler
+            if self._assembler:
+                effective_system = await self._assembler.build(
+                    user_id=sender_id,
+                    session_key=session_key,
+                    is_new_session=is_new_session,
+                )
+            else:
+                effective_system = ""
 
             # ── Thinking card: immediate feedback ──
             thinking_id = await self._dispatcher.send_card(

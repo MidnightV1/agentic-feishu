@@ -174,6 +174,20 @@ async def main() -> None:
     def _provider_factory(name: str):
         return create_provider(settings, name)
 
+    # ── Heartbeat + Scheduler ─────────────────────────────────────
+    heartbeat = HeartbeatMonitor(
+        usage_tracker=usage_tracker,
+        daily_budget_usd=settings.max_budget_usd * 10,
+    )
+    scheduler = Scheduler()
+    scheduler.add_job(JobConfig(
+        name="heartbeat",
+        handler=heartbeat.check,
+        interval_seconds=300,
+        enabled=True,
+    ))
+    await scheduler.start()
+
     # ── Build bot configs (multi-bot or legacy single-bot) ────────
     bot_configs: list[BotConfig] = list(settings.bots)
     if not bot_configs:
@@ -258,19 +272,7 @@ async def main() -> None:
 
     log.info("All %d bot(s) started", len(adapters))
 
-    # ── Heartbeat + Scheduler ─────────────────────────────────────
-    heartbeat = HeartbeatMonitor(
-        usage_tracker=usage_tracker,
-        daily_budget_usd=settings.max_budget_usd * 10,  # daily = 10x per-request
-    )
-    scheduler = Scheduler()
-    scheduler.add_job(JobConfig(
-        name="heartbeat",
-        handler=heartbeat.check,
-        interval_seconds=300,  # 5 min
-        enabled=True,
-    ))
-    await scheduler.start()
+
 
     log.info("agentic-feishu ready — %d bot(s) listening", len(adapters))
 

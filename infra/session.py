@@ -44,9 +44,9 @@ CREATE INDEX IF NOT EXISTS idx_sessions_bot ON sessions(bot_id);
 @dataclass
 class SessionRecord:
     session_key: str
+    provider: str = ""
+    model: str = ""
     bot_id: str = "main"
-    provider: str
-    model: str
     created_at: float = 0.0
     updated_at: float = 0.0
     message_count: int = 0
@@ -69,12 +69,29 @@ class SessionStore:
         self._db: aiosqlite.Connection | None = None
 
     async def init(self) -> None:
-        """Open database and create tables if not exist."""
+        """Open database, create tables, run migrations."""
         import os
 
         os.makedirs(os.path.dirname(self.db_path) or ".", exist_ok=True)
         self._db = await aiosqlite.connect(self.db_path)
         self._db.row_factory = aiosqlite.Row
+
+        # Migration: add bot_id column if missing (existing DBs pre-v2.2)
+        try:
+            cursor = await self._db.execute("PRAGMA table_info(sessions)")
+            columns = [row[1] for row in await cursor.fetchall()]
+            if "bot_id" not in columns and "session_key" in columns:
+                await self._db.execute(
+                    "ALTER TABLE sessions ADD COLUMN bot_id TEXT NOT NULL DEFAULT 'main'"
+                )
+                await self._db.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_sessions_bot ON sessions(bot_id)"
+                )
+                await self._db.commit()
+                log.info("Migrated sessions table: added bot_id column")
+        except Exception:
+            pass  # table doesn't exist yet, CREATE TABLE will handle it
+
         await self._db.executescript(_CREATE_TABLES)
         await self._db.commit()
         log.info("Session store initialized at %s", self.db_path)

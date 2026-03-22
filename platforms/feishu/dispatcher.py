@@ -17,24 +17,24 @@ MAX_CHUNK_LEN = 4000  # Feishu card markdown limit per element
 # Secret scanning — redact credentials before they reach Feishu
 # ---------------------------------------------------------------------------
 _SECRET_PATTERNS = [
-    (re.compile(r'sk-ant-[a-zA-Z0-9_-]{20,}'), "Anthropic API Key"),
-    (re.compile(r'sk-[a-zA-Z0-9]{20,}'), "OpenAI API Key"),
-    (re.compile(r'ghp_[a-zA-Z0-9]{36,}'), "GitHub PAT"),
-    (re.compile(r'gho_[a-zA-Z0-9]{36,}'), "GitHub OAuth"),
-    (re.compile(r'github_pat_[a-zA-Z0-9_]{22,}'), "GitHub Fine-grained PAT"),
-    (re.compile(r'AKIA[0-9A-Z]{16}'), "AWS Access Key"),
-    (re.compile(r'-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----'), "Private Key"),
-    (re.compile(r'xoxb-[0-9]{10,}-[a-zA-Z0-9]{20,}'), "Slack Bot Token"),
+    re.compile(r'sk-ant-api03-[a-zA-Z0-9\-_]{20,}'),          # Anthropic
+    re.compile(r'sk-[a-zA-Z0-9]{20,}'),                        # OpenAI
+    re.compile(r'ghp_[a-zA-Z0-9]{10,}'),                       # GitHub PAT
+    re.compile(r'gho_[a-zA-Z0-9]{10,}'),                       # GitHub OAuth
+    re.compile(r'github_pat_[a-zA-Z0-9_]{22,}'),               # GitHub Fine-grained PAT
+    re.compile(r'xox[baprs]-[a-zA-Z0-9\-]{10,}'),             # Slack
+    re.compile(r'AIza[a-zA-Z0-9\-_]{30,}'),                   # Google API Key
+    re.compile(r'AKIA[0-9A-Z]{16}'),                            # AWS Access Key
+    re.compile(r'-----BEGIN [A-Z]+ PRIVATE KEY-----'),          # Private keys
 ]
 
 
-def _scan_secrets(text: str) -> str:
-    """Scan text for known secret patterns and redact them."""
-    for pattern, name in _SECRET_PATTERNS:
-        if pattern.search(text):
-            log.warning("Secret detected in outbound message: %s — redacting", name)
-            text = pattern.sub(f"[REDACTED: {name}]", text)
-    return text
+def _contains_secret(text: str) -> str | None:
+    """Check text for known secret patterns. Returns matched pattern snippet or None."""
+    for pat in _SECRET_PATTERNS:
+        if pat.search(text):
+            return pat.pattern[:30]
+    return None
 
 # Card header directive: {{card:header=标题,color=blue}}
 _CARD_DIRECTIVE_RE = re.compile(
@@ -207,7 +207,10 @@ class FeishuDispatcher:
             log.error("Dispatcher not started")
             return None
 
-        text = _scan_secrets(text)
+        secret = _contains_secret(text)
+        if secret:
+            log.warning("Blocked outbound message containing secret: %s", secret)
+            return None
         text, header, color = _parse_card_directive(text)
         chunks = _chunk_markdown(text)
 
@@ -322,7 +325,10 @@ class FeishuDispatcher:
         if not self._client:
             return None
 
-        text = _scan_secrets(text)
+        secret = _contains_secret(text)
+        if secret:
+            log.warning("Blocked outbound text containing secret: %s", secret)
+            return None
 
         import lark_oapi as lark
         from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
@@ -355,7 +361,10 @@ class FeishuDispatcher:
             log.error("Dispatcher not started")
             return None
 
-        text = _scan_secrets(text)
+        secret = _contains_secret(text)
+        if secret:
+            log.warning("Blocked outbound message containing secret: %s", secret)
+            return None
         text, header, color = _parse_card_directive(text)
         chunks = _chunk_markdown(text)
 

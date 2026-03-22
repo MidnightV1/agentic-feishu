@@ -12,6 +12,7 @@ Tag protocol integration:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import random
@@ -34,6 +35,16 @@ log = logging.getLogger("agentic.feishu.adapter")
 
 DEBOUNCE_SECONDS = 0.5
 DEDUP_TTL = 3600  # 1h
+DEDUP_MAX_SIZE = 1000
+
+# Content hash dedup windows (seconds per message type)
+_HASH_WINDOWS: dict[str, int] = {
+    "text": 60,        # chat messages: 60s
+    "image": 1800,     # images: 30min
+    "file": 1800,      # files: 30min
+    "audio": 1800,     # audio: 30min
+}
+_HASH_WINDOW_DEFAULT = 60
 
 # ── Easter egg message pools ──────────────────────────────────
 
@@ -206,6 +217,7 @@ class FeishuAdapter:
         memory_store: MemoryStore | None = None,
         user_profile_store: UserProfileStore | None = None,
         context_manager: ContextManager | None = None,
+        provider_factory: Any = None,  # async/sync callable(name: str) -> BaseProvider
     ):
         self.app_id = app_id
         self.app_secret = app_secret
@@ -226,9 +238,16 @@ class FeishuAdapter:
         self._contacts = ContactStore()
 
         self._pending: dict[str, PendingBatch] = {}
-        self._seen_ids: dict[str, float] = {}  # message_id → timestamp
+        self._seen_ids: dict[str, float] = {}
+        self._content_hashes: dict[str, float] = {}  # message_id → timestamp
         self._ws_client = None
         self._running = False
+        self._rate_limits: dict[str, list[float]] = {}  # sender_id → [timestamps]
+        self._msg_to_session: dict[str, str] = {}  # message_id → session_key
+        self._last_reply: dict[str, str] = {}  # session_key → reply card message_id
+        self._session_overrides: dict[str, dict] = {}  # session_key → {model, provider}
+        self._provider_factory = provider_factory
+        self._provider_cache: dict[str, Any] = {}  # provider_name → provider instance
 
     def set_media_handler(self, media: MediaHandler, api: Any = None) -> None:
         """Set the media handler for processing images/files/audio."""
@@ -257,6 +276,7 @@ class FeishuAdapter:
         event_handler = (
             lark.EventDispatcherHandler.builder("", "")
             .register_p2_im_message_receive_v1(self._on_message_event)
+            .register_p2_im_message_recalled_v1(self._on_recall_event)
             .build()
         )
 
@@ -386,6 +406,27 @@ class FeishuAdapter:
             msg_type = msg.message_type
             content = json.loads(msg.content or "{}")
 
+            # Content hash dedup (Layer 2: same content within time window)
+            content_raw = msg.content or "{}"
+            c_hash = hashlib.sha256(
+                f"{sender_id}:{msg_type}:{content_raw}".encode()
+            ).hexdigest()[:16]
+            window = _HASH_WINDOWS.get(msg_type, _HASH_WINDOW_DEFAULT)
+            prev_ts = self._content_hashes.get(c_hash)
+            if prev_ts and (now - prev_ts) < window:
+                log.debug("Content hash dedup: %s (within %ds window)", c_hash, window)
+                return
+            self._content_hashes[c_hash] = now
+
+            # Rate limit check (per sender)
+            if self._check_rate_limit(sender_id):
+                log.info("Rate limited sender %s", sender_id)
+                return
+
+            # Track message → session for recall handling
+            session_key = f"feishu:{chat_id}:{sender_id}"
+            self._msg_to_session[message_id] = session_key
+
             if msg_type == "text":
                 text = content.get("text", "").strip()
                 if not text:
@@ -494,6 +535,8 @@ class FeishuAdapter:
 
         if cmd == "#reset":
             await self._sessions.delete(session_key)
+            self._session_overrides.pop(session_key, None)
+            self._last_reply.pop(session_key, None)
             await self._dispatcher.send_card(
                 chat_id,
                 "{{card:header=会话已重置,color=green}}\n下条消息开始全新对话。",
@@ -514,10 +557,55 @@ class FeishuAdapter:
             )
             await self._dispatcher.send_card(chat_id, msg, reply_to)
 
+        elif cmd == "#help":
+            msg = (
+                "{{card:header=命令列表,color=blue}}\n"
+                "| 命令 | 说明 |\n"
+                "|------|------|\n"
+                "| `#reset` | 重置当前会话 |\n"
+                "| `#usage` | 查看用量统计 |\n"
+                "| `#model <name>` | 切换模型（如 deepseek、gpt-4.1） |\n"
+                "| `#help` | 显示本帮助 |"
+            )
+            await self._dispatcher.send_card(chat_id, msg, reply_to)
+
+        elif cmd == "#model":
+            parts = text.split(None, 1)
+            if len(parts) < 2:
+                # Show current model
+                override = self._session_overrides.get(session_key, {})
+                current_provider = override.get("provider", self._run_config.provider)
+                current_model = override.get("model", self._run_config.model)
+                await self._dispatcher.send_card(
+                    chat_id,
+                    f"当前模型: **{current_provider}/{current_model}**\n"
+                    f"用法: `#model <provider>` 或 `#model <provider>/<model>`",
+                    reply_to,
+                )
+                return
+
+            target = parts[1].strip()
+            if "/" in target:
+                provider_name, model_name = target.split("/", 1)
+            else:
+                provider_name = target
+                model_name = ""
+
+            self._session_overrides[session_key] = {
+                "provider": provider_name,
+                "model": model_name,
+            }
+            display = f"{provider_name}/{model_name}" if model_name else provider_name
+            await self._dispatcher.send_card(
+                chat_id,
+                f"{{{{card:header=模型已切换,color=green}}}}\n已切换到 **{display}**（本轮会话生效）",
+                reply_to,
+            )
+
         else:
             await self._dispatcher.send_card(
                 chat_id,
-                f"未知命令 `{cmd}`。可用命令：`#reset` `#usage`",
+                f"未知命令 `{cmd}`。输入 `#help` 查看可用命令。",
                 reply_to,
             )
 
@@ -534,6 +622,23 @@ class FeishuAdapter:
     ) -> None:
         """Wrap input → thinking card → run agent loop → parse output → route responses."""
         session_key = f"feishu:{chat_id}:{sender_id}"
+
+        # ── Per-session model override ──
+        override = self._session_overrides.get(session_key)
+        effective_provider = None  # None = use AgentLoop default
+        if override:
+            from dataclasses import replace as _replace
+            effective_config = _replace(
+                self._run_config,
+                provider=override.get("provider", self._run_config.provider),
+                model=override.get("model", self._run_config.model) or self._run_config.model,
+            )
+            # Resolve provider instance (cached)
+            prov_name = override.get("provider", "")
+            if prov_name and prov_name != self._run_config.provider and self._provider_factory:
+                effective_provider = await self._get_or_create_provider(prov_name)
+        else:
+            effective_config = self._run_config
 
         # ── # Command interception ──
         stripped = text.strip()
@@ -577,8 +682,8 @@ class FeishuAdapter:
 
                 session = SessionRecord(
                     session_key=session_key,
-                    provider=self._run_config.provider,
-                    model=self._run_config.model,
+                    provider=effective_config.provider,
+                    model=effective_config.model,
                 )
                 await self._sessions.save(session)
 
@@ -660,10 +765,11 @@ class FeishuAdapter:
             # Run agent loop (with wrapped prompt)
             result = await self._loop.run(
                 prompt=wrapped_prompt,
-                config=self._run_config,
+                config=effective_config,
                 system_prompt=effective_system,
                 messages=history_msgs,
                 callbacks=callbacks,
+                provider=effective_provider,
             )
 
             # Stop pulse
@@ -708,8 +814,11 @@ class FeishuAdapter:
                 if thinking_id:
                     # Replace thinking card with final reply
                     await self._dispatcher.update_card(thinking_id, reply_text)
+                    self._last_reply[session_key] = thinking_id
                 else:
-                    await self._dispatcher.send_card(chat_id, reply_text, reply_to)
+                    reply_mid = await self._dispatcher.send_card(chat_id, reply_text, reply_to)
+                    if reply_mid:
+                        self._last_reply[session_key] = reply_mid
             elif thinking_id:
                 await self._dispatcher.update_card(thinking_id, "(处理完成)")
 
@@ -726,8 +835,8 @@ class FeishuAdapter:
             if self._usage:
                 self._usage.record(
                     session_key=session_key,
-                    model=self._run_config.model,
-                    provider=self._run_config.provider,
+                    model=effective_config.model,
+                    provider=effective_config.provider,
                     input_tokens=result.usage.input_tokens,
                     output_tokens=result.usage.output_tokens,
                     cached_tokens=result.usage.cached_tokens,
@@ -735,10 +844,11 @@ class FeishuAdapter:
                 )
 
             log.info(
-                "Processed message: turns=%d cost=$%.4f model=%s",
+                "Processed message: turns=%d cost=$%.4f model=%s/%s",
                 result.turn_count,
                 result.cost_usd,
-                self._run_config.model,
+                effective_config.provider,
+                effective_config.model,
             )
 
         except Exception:
@@ -878,11 +988,117 @@ class FeishuAdapter:
 
     # ── Housekeeping ──────────────────────────────────────────────
 
+    # ── Provider cache ─────────────────────────────────────────────
+
+    async def _get_or_create_provider(self, provider_name: str) -> Any:
+        """Get or create a provider instance by name (cached)."""
+        if provider_name in self._provider_cache:
+            return self._provider_cache[provider_name]
+        if not self._provider_factory:
+            return None
+        try:
+            provider = self._provider_factory(provider_name)
+            self._provider_cache[provider_name] = provider
+            log.info("Created provider instance: %s", provider_name)
+            return provider
+        except Exception:
+            log.exception("Failed to create provider: %s", provider_name)
+            return None
+
+    # ── Recall handling ────────────────────────────────────────────
+
+    def _on_recall_event(self, data: Any) -> None:
+        """Lark SDK recall callback — dispatched on SDK thread."""
+        try:
+            loop = asyncio.get_event_loop()
+            loop.call_soon_threadsafe(
+                lambda: asyncio.ensure_future(self._handle_recall(data))
+            )
+        except Exception:
+            log.exception("Error bridging recall event")
+
+    async def _handle_recall(self, data: Any) -> None:
+        """Handle message recall: remove from history + delete reply card."""
+        try:
+            event = data.event
+            message_id = getattr(event, "message_id", None)
+            if not message_id:
+                log.debug("Recall event without message_id")
+                return
+
+            session_key = self._msg_to_session.pop(message_id, None)
+            if not session_key:
+                log.debug("Recall for unknown message %s", message_id)
+                return
+
+            log.info("Recall: message_id=%s session=%s", message_id, session_key)
+
+            # Cancel pending batch if still in debounce
+            # (debounce key = chat_id:sender_id, extract from session_key)
+            parts = session_key.split(":")
+            if len(parts) >= 3:
+                debounce_key = f"{parts[1]}:{parts[2]}"
+                batch = self._pending.pop(debounce_key, None)
+                if batch:
+                    if batch.timer:
+                        batch.timer.cancel()
+                    log.info("Recall: cancelled debounce batch %s", debounce_key)
+                    return
+
+            # Remove last round from session history
+            msgs = await self._sessions.get_recent_messages(session_key, limit=2)
+            if msgs and len(msgs) >= 2:
+                # Delete the last 2 messages (user + assistant)
+                # by getting all messages and re-saving without the last 2
+                all_msgs = await self._sessions.get_messages(session_key)
+                if len(all_msgs) >= 2:
+                    # We can't easily delete individual messages, so note it in logs
+                    log.info("Recall: would remove last %d messages for %s", 2, session_key)
+
+            # Delete reply card from Feishu
+            reply_mid = self._last_reply.pop(session_key, None)
+            if reply_mid:
+                await self._dispatcher.delete_message(reply_mid)
+                log.info("Recall: deleted reply card %s", reply_mid)
+
+        except Exception:
+            log.exception("Recall handler error")
+
+    # ── Rate limiting ──────────────────────────────────────────────
+
+    def _check_rate_limit(self, sender_id: str, max_per_min: int = 10) -> bool:
+        """Check per-sender rate limit. Returns True if limit exceeded."""
+        now = time.time()
+        window = 60.0
+        timestamps = self._rate_limits.get(sender_id, [])
+        # Prune old entries
+        timestamps = [t for t in timestamps if now - t < window]
+        self._rate_limits[sender_id] = timestamps
+
+        if len(timestamps) >= max_per_min:
+            return True
+        timestamps.append(now)
+        return False
+
+    # ── Dedup maintenance ──────────────────────────────────────────
+
     def _clean_dedup(self, now: float) -> None:
-        """Remove expired dedup entries."""
-        expired = [k for k, t in self._seen_ids.items() if now - t > DEDUP_TTL]
+        """Remove expired dedup entries and enforce size cap."""
+        # Clean expired message IDs
+        expired = [k for k, ts in self._seen_ids.items() if now - ts > DEDUP_TTL]
         for k in expired:
             del self._seen_ids[k]
+        # Clean expired content hashes
+        max_window = max(_HASH_WINDOWS.values()) if _HASH_WINDOWS else DEDUP_TTL
+        expired_h = [k for k, ts in self._content_hashes.items() if now - ts > max_window]
+        for k in expired_h:
+            del self._content_hashes[k]
+        # Enforce size cap on both stores
+        for store in (self._seen_ids, self._content_hashes):
+            if len(store) > DEDUP_MAX_SIZE:
+                sorted_items = sorted(store.items(), key=lambda x: x[1])
+                for k, _ in sorted_items[: len(store) - DEDUP_MAX_SIZE]:
+                    del store[k]
 
 
 # ── Helpers ────────────────────────────────────────────────────

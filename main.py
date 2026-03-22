@@ -106,12 +106,18 @@ async def main() -> None:
     log.info("Tools available: %s", registry.list_tools())
 
     # ── Context manager ───────────────────────────────────────────
-    compress_provider = provider
+    # If compress_provider is configured, use it as primary compressor
+    # with the default provider as fallback (like Hub's Sonnet → Gemini strategy).
+    compress_primary = provider
+    compress_fallback = None
     if settings.compress_provider:
-        compress_provider = create_provider(settings, settings.compress_provider)
-    context_mgr = ContextManager(compress_provider, ContextConfig(
-        compress_threshold=settings.context_compress_threshold,
-    ))
+        compress_primary = create_provider(settings, settings.compress_provider)
+        compress_fallback = provider  # default provider as safety net
+    context_mgr = ContextManager(
+        compress_primary,
+        ContextConfig(compress_threshold=settings.context_compress_threshold),
+        fallback_provider=compress_fallback,
+    )
 
     # ── Agent loop ────────────────────────────────────────────────
     agent_loop = AgentLoop(provider, registry, context_mgr)
@@ -190,6 +196,10 @@ async def main() -> None:
     # ── Media handler ─────────────────────────────────────────────
     media_handler = MediaHandler(api=feishu_api, data_dir=settings.data_dir)
 
+    # ── Provider factory for per-session model switching ──────────
+    def _provider_factory(name: str):
+        return create_provider(settings, name)
+
     # ── Feishu adapter ────────────────────────────────────────────
     adapter = FeishuAdapter(
         app_id=settings.feishu.app_id,
@@ -203,6 +213,7 @@ async def main() -> None:
         memory_store=memory_store,
         user_profile_store=user_profile_store,
         context_manager=context_mgr,
+        provider_factory=_provider_factory,
     )
     adapter.set_media_handler(media_handler, feishu_api)
     await adapter.start()

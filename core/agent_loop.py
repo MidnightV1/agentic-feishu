@@ -31,8 +31,14 @@ class AgentLoop:
         system_prompt: str = "",
         messages: list[Message] | None = None,
         callbacks: Callbacks | None = None,
+        provider: Any = None,
     ) -> RunResult:
-        """Execute the agent loop until completion."""
+        """Execute the agent loop until completion.
+
+        Args:
+            provider: Optional provider override (for per-session model switching).
+                      If None, uses the default provider.
+        """
         cb = callbacks or Callbacks()
         msgs = list(messages) if messages else []
 
@@ -58,7 +64,7 @@ class AgentLoop:
             if cb.on_turn_start:
                 await cb.on_turn_start(turn)
             assistant_msg, turn_usage = await self._call_provider(
-                msgs, tool_schemas, config, cb
+                msgs, tool_schemas, config, cb, provider=provider,
             )
             msgs.append(assistant_msg)
             total_usage += turn_usage
@@ -98,6 +104,7 @@ class AgentLoop:
         tool_schemas: list[dict],
         config: RunConfig,
         cb: Callbacks,
+        provider: Any = None,
     ) -> tuple[Message, Usage]:
         """Call the LLM provider, handling both streaming and non-streaming."""
         kwargs: dict[str, Any] = {}

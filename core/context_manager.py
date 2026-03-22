@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -74,6 +75,7 @@ class ContextConfig:
     recent_rounds_keep: int = 5  # keep last N rounds raw in hybrid mode
     max_summary_tokens: int = 4000  # max tokens for summary
     pin_system_messages: bool = True  # never compress system messages
+    compress_timeout: int = 60  # seconds; 0 = no timeout
 
 
 @dataclass
@@ -93,8 +95,14 @@ class ContextComponent:
 class ContextManager:
     """Manages context window, compression, and system prompt assembly."""
 
-    def __init__(self, provider: BaseProvider, config: ContextConfig | None = None):
+    def __init__(
+        self,
+        provider: BaseProvider,
+        config: ContextConfig | None = None,
+        fallback_provider: BaseProvider | None = None,
+    ):
         self.provider = provider
+        self.fallback_provider = fallback_provider
         self.config = config or ContextConfig()
 
     # -- System prompt assembly ---------------------------------------------
@@ -175,11 +183,13 @@ class ContextManager:
     # -- Internals ----------------------------------------------------------
 
     async def _summarize(self, messages: list[Message]) -> list[Message]:
-        """Ask the provider to compress *messages* into a summary message."""
+        """Ask the provider to compress *messages* into a summary message.
+
+        Strategy: primary provider with timeout -> fallback provider -> raise.
+        """
         if not messages:
             return []
 
-        # Build a transcript for the LLM
         transcript_parts: list[str] = []
         for m in messages:
             transcript_parts.append(f"[{m.role}] {m.text}")
@@ -190,16 +200,20 @@ class ContextManager:
             content=f"{SUMMARY_PROMPT}\n\n---\n\n{transcript}",
         )
 
-        try:
-            response = await self.provider.chat(
-                messages=[prompt_msg],
-                stream=False,
-                max_tokens=self.config.max_summary_tokens,
+        timeout = self.config.compress_timeout or None
+
+        # Primary provider
+        summary_text = await self._try_compress(self.provider, prompt_msg, timeout, "primary")
+
+        # Fallback provider
+        if summary_text is None and self.fallback_provider:
+            fallback_timeout = max(30, (timeout or 60) // 2)
+            summary_text = await self._try_compress(
+                self.fallback_provider, prompt_msg, fallback_timeout, "fallback",
             )
-            summary_text = response.text if hasattr(response, "text") else str(response.content)
-        except Exception:
-            logger.exception("LLM summarization failed")
-            raise
+
+        if summary_text is None:
+            raise RuntimeError("All compression providers failed")
 
         return [
             Message(
@@ -207,6 +221,38 @@ class ContextManager:
                 content=f"[compressed history]\n{summary_text}",
             )
         ]
+
+    async def _try_compress(
+        self,
+        provider: BaseProvider,
+        prompt_msg: Message,
+        timeout: int | None,
+        label: str,
+    ) -> str | None:
+        """Attempt compression with a single provider. Returns summary text or None."""
+        try:
+            coro = provider.chat(
+                messages=[prompt_msg],
+                stream=False,
+                max_tokens=self.config.max_summary_tokens,
+            )
+            if timeout:
+                response = await asyncio.wait_for(coro, timeout=timeout)
+            else:
+                response = await coro
+            text = response.text if hasattr(response, "text") else str(response.content)
+            if text and text.strip():
+                logger.info(
+                    "Compression via %s (%s) succeeded: %d chars",
+                    label, provider.name, len(text),
+                )
+                return text.strip()
+            logger.warning("Compression via %s returned empty result", label)
+        except asyncio.TimeoutError:
+            logger.warning("Compression via %s timed out after %ds", label, timeout)
+        except Exception:
+            logger.exception("Compression via %s failed", label)
+        return None
 
 
 # ---------------------------------------------------------------------------

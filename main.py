@@ -214,6 +214,7 @@ async def main() -> None:
         user_profile_store=user_profile_store,
         context_manager=context_mgr,
         provider_factory=_provider_factory,
+        scheduler=scheduler,
     )
     adapter.set_media_handler(media_handler, feishu_api)
     await adapter.start()

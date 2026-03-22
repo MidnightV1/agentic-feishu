@@ -218,6 +218,7 @@ class FeishuAdapter:
         user_profile_store: UserProfileStore | None = None,
         context_manager: ContextManager | None = None,
         provider_factory: Any = None,  # async/sync callable(name: str) -> BaseProvider
+        scheduler: Any = None,  # jobs.scheduler.Scheduler (for #jobs command)
     ):
         self.app_id = app_id
         self.app_secret = app_secret
@@ -247,6 +248,7 @@ class FeishuAdapter:
         self._last_reply: dict[str, str] = {}  # session_key → reply card message_id
         self._session_overrides: dict[str, dict] = {}  # session_key → {model, provider}
         self._provider_factory = provider_factory
+        self._scheduler = scheduler
         self._provider_cache: dict[str, Any] = {}  # provider_name → provider instance
 
     def set_media_handler(self, media: MediaHandler, api: Any = None) -> None:
@@ -277,6 +279,7 @@ class FeishuAdapter:
             lark.EventDispatcherHandler.builder("", "")
             .register_p2_im_message_receive_v1(self._on_message_event)
             .register_p2_im_message_recalled_v1(self._on_recall_event)
+            .register_p2_card_action_trigger(self._on_card_action_sync)
             .build()
         )
 
@@ -557,6 +560,29 @@ class FeishuAdapter:
             )
             await self._dispatcher.send_card(chat_id, msg, reply_to)
 
+        elif cmd == "#menu":
+            await self._send_menu_card(chat_id)
+
+        elif cmd == "#jobs":
+            if not self._scheduler:
+                await self._dispatcher.send_card(chat_id, "调度器未启用。", reply_to)
+                return
+            from datetime import datetime as _dt
+            jobs = self._scheduler.list_jobs(include_disabled=True)
+            if not jobs:
+                await self._dispatcher.send_card(chat_id, "当前没有定时任务。", reply_to)
+                return
+            lines = ["{{card:header=定时任务,color=blue}}"]
+            for j in jobs:
+                status = "✅" if j.enabled else "⚠️"
+                sched = j.cron or j.at_time or f"{j.interval_seconds}s"
+                next_run = ""
+                if j.next_run_at:
+                    next_run = _dt.fromtimestamp(j.next_run_at).strftime("%m-%d %H:%M")
+                err = f" ❌×{j.consecutive_errors}" if j.consecutive_errors else ""
+                lines.append(f"{status} **{j.name}** `{sched}` → {next_run}{err}")
+            await self._dispatcher.send_card(chat_id, "\n".join(lines), reply_to)
+
         elif cmd == "#help":
             msg = (
                 "{{card:header=命令列表,color=blue}}\n"
@@ -565,6 +591,8 @@ class FeishuAdapter:
                 "| `#reset` | 重置当前会话 |\n"
                 "| `#usage` | 查看用量统计 |\n"
                 "| `#model <name>` | 切换模型（如 deepseek、gpt-4.1） |\n"
+                "| `#jobs` | 查看定时任务 |\n"
+                "| `#menu` | 快捷操作面板 |\n"
                 "| `#help` | 显示本帮助 |"
             )
             await self._dispatcher.send_card(chat_id, msg, reply_to)
@@ -1004,6 +1032,81 @@ class FeishuAdapter:
         except Exception:
             log.exception("Failed to create provider: %s", provider_name)
             return None
+
+    # ── Card action handling ────────────────────────────────────────
+
+    def _on_card_action_sync(self, data: Any) -> dict:
+        """Lark SDK card action callback (synchronous, on SDK thread).
+
+        Returns an empty card response (acknowledge). Actual processing
+        is dispatched to the asyncio loop.
+        """
+        try:
+            loop = asyncio.get_event_loop()
+            loop.call_soon_threadsafe(
+                lambda: asyncio.ensure_future(self._handle_card_action(data))
+            )
+        except Exception:
+            log.exception("Error bridging card action")
+        # Return empty response to acknowledge
+        return {}
+
+    async def _handle_card_action(self, data: Any) -> None:
+        """Process a card action (button click) as a synthetic user message."""
+        try:
+            action = data.event.action
+            value = action.value if hasattr(action, "value") else {}
+            operator = data.event.operator
+            operator_id = operator.open_id if hasattr(operator, "open_id") else ""
+
+            if not value or not operator_id:
+                return
+
+            # Menu action: inject the command as a user message
+            command = value.get("command", "")
+            if not command:
+                return
+
+            # Find the chat context from the action event
+            # Card actions include the open_message_id which we can use
+            # For simplicity, send to operator's DM or use stored chat context
+            chat_id = value.get("chat_id", "")
+            if not chat_id:
+                log.debug("Card action without chat_id context, skipping")
+                return
+
+            sender_name = await self._contacts.get_name(operator_id) or "用户"
+            log.info("Card action: operator=%s command=%s", operator_id, command)
+
+            # Route as if user typed the command
+            await self._process_message(
+                command, chat_id, "p2p", operator_id, sender_name, "",
+            )
+        except Exception:
+            log.exception("Card action handler error")
+
+    # ── Menu card ──────────────────────────────────────────────────
+
+    async def _send_menu_card(self, chat_id: str) -> None:
+        """Send a quick-action menu card with interactive buttons."""
+        buttons = [
+            {"text": "📊 用量统计", "type": "default",
+             "value": {"command": "#usage", "chat_id": chat_id}},
+            {"text": "📅 今日日程", "type": "default",
+             "value": {"command": "今天有什么日程？", "chat_id": chat_id}},
+            {"text": "🔄 定时任务", "type": "default",
+             "value": {"command": "#jobs", "chat_id": chat_id}},
+            {"text": "❓ 帮助", "type": "default",
+             "value": {"command": "#help", "chat_id": chat_id}},
+        ]
+        from platforms.feishu.dispatcher import FeishuDispatcher
+        btn_group = FeishuDispatcher.build_button_group(buttons, layout="bisected")
+        elements = [{"tag": "markdown", "content": "选择一个快捷操作："}]
+        elements.extend(btn_group)
+        card_json = FeishuDispatcher.build_interactive_card(
+            elements, header="快捷操作面板", color="blue",
+        )
+        await self._dispatcher.send_card_raw(chat_id, card_json)
 
     # ── Recall handling ────────────────────────────────────────────
 

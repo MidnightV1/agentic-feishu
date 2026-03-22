@@ -379,6 +379,74 @@ class FeishuDispatcher:
 
         return first_msg_id
 
+    # ── Interactive card builders ───────────────────────────────────
+
+    @staticmethod
+    def build_button_group(
+        buttons: list[dict],
+        layout: str = "bisected",
+    ) -> list[dict]:
+        """Build a button group for interactive cards.
+
+        Each button dict: {text, value, type="default"|"primary"|"danger"}
+        Layout: "bisected" (2 cols), "trisected" (3 cols), "flow" (single row)
+        """
+        elements: list[dict] = []
+        for btn in buttons:
+            elements.append({
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": btn["text"]},
+                "type": btn.get("type", "default"),
+                "value": btn.get("value", {}),
+            })
+
+        if layout == "flow":
+            return [{"tag": "action", "actions": elements}]
+
+        # bisected / trisected → use column_set
+        cols_per_row = 2 if layout == "bisected" else 3
+        rows: list[dict] = []
+        for i in range(0, len(elements), cols_per_row):
+            chunk = elements[i : i + cols_per_row]
+            columns = []
+            for btn_el in chunk:
+                columns.append({
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "elements": [btn_el],
+                })
+            rows.append({
+                "tag": "column_set",
+                "flex_mode": "stretch",
+                "columns": columns,
+            })
+        return rows
+
+    @staticmethod
+    def build_interactive_card(
+        elements: list[dict],
+        header: str | None = None,
+        color: str = "blue",
+    ) -> dict:
+        """Build a complete interactive card JSON 2.0 with custom elements."""
+        card: dict = {
+            "schema": "2.0",
+            "body": {"elements": elements},
+        }
+        if header:
+            card["header"] = {
+                "title": {"tag": "plain_text", "content": header},
+                "template": CARD_COLORS.get(color, "blue"),
+            }
+        return card
+
+    async def send_card_raw(self, chat_id: str, card_json: dict) -> str | None:
+        """Send a pre-built card JSON directly."""
+        if not self._client:
+            return None
+        return await self._send_card_raw(chat_id, card_json)
+
     async def delete_message(self, message_id: str) -> bool:
         """Delete a message by ID."""
         if not self._client:

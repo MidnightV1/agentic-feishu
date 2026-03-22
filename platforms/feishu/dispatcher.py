@@ -252,7 +252,6 @@ class FeishuDispatcher:
             return False
 
     _RETRY_MAX = 2  # max retries (total 3 attempts)
-    _RETRY_BACKOFF = (1, 2)  # seconds
 
     async def _send_card_raw(
         self, receive_id: str, card: dict, reply_message_id: str = "",
@@ -309,7 +308,7 @@ class FeishuDispatcher:
             except Exception as e:
                 last_exc = e
                 if attempt < self._RETRY_MAX:
-                    delay = self._RETRY_BACKOFF[attempt]
+                    delay = 2 ** (attempt + 1)  # exponential: 2s, 4s
                     log.warning(
                         "Send card network error (attempt %d/%d), retrying in %ds: %s",
                         attempt + 1, 1 + self._RETRY_MAX, delay, e,

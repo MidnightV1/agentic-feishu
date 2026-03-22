@@ -343,7 +343,7 @@ class FeishuAdapter:
     # ── WS Health Monitor ─────────────────────────────────────────
 
     async def _ws_health_monitor(self) -> None:
-        """Check WebSocket health every 30s. Exit process if dead for 90s.
+        """Check WebSocket health with exponential backoff. Exit if unrecoverable.
 
         Lark SDK bug: disconnection leaves _select() spinning forever
         without reconnecting. Force exit to let process manager restart.
@@ -351,7 +351,8 @@ class FeishuAdapter:
         await asyncio.sleep(30)  # initial grace period
         consecutive_failures = 0
         while self._running:
-            await asyncio.sleep(30)
+            check_interval = min(30 * (2 ** consecutive_failures), 120)  # 30s → 60s → 120s cap
+            await asyncio.sleep(check_interval if consecutive_failures == 0 else 30)
             try:
                 conn = getattr(self._ws_client, "_conn", None)
                 if conn is None:
@@ -364,13 +365,20 @@ class FeishuAdapter:
                     consecutive_failures = 0
                     continue
 
+                dead_seconds = sum(30 * (2 ** i) for i in range(consecutive_failures))
                 if consecutive_failures >= 3:
                     log.error(
-                        "WebSocket dead for %ds, exiting for process restart",
-                        consecutive_failures * 30,
+                        "WebSocket dead for ~%ds (%d consecutive failures), "
+                        "exiting for process restart",
+                        dead_seconds, consecutive_failures,
                     )
                     import sys
                     sys.exit(1)
+                else:
+                    log.warning(
+                        "WebSocket unhealthy (failure %d/3, ~%ds elapsed)",
+                        consecutive_failures, dead_seconds,
+                    )
             except Exception:
                 pass
 

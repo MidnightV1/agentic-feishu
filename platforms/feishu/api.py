@@ -162,6 +162,52 @@ def _split_reply(text: str, limit: int) -> list[str]:
     return [c for c in chunks if c]
 
 
+def _anchor_quote(doc_content: str, quote: str, ctx_chars: int = 200) -> dict:
+    """Find quote in document and extract surrounding context."""
+    import re as _re
+    if not quote:
+        return {"before": "", "quoted": "", "after": "", "matched": False}
+
+    norm_content = _re.sub(r"\s+", " ", doc_content)
+    norm_quote = _re.sub(r"\s+", " ", quote.strip())
+
+    pos = norm_content.find(norm_quote)
+    # Fallback: try first 40 chars (doc may have been edited since comment)
+    if pos == -1 and len(norm_quote) > 40:
+        pos = norm_content.find(norm_quote[:40])
+
+    if pos == -1:
+        return {"before": "", "quoted": quote, "after": "", "matched": False}
+
+    start = max(0, pos - ctx_chars)
+    end = min(len(norm_content), pos + len(norm_quote) + ctx_chars)
+
+    before = norm_content[start:pos].strip()
+    matched_text = norm_content[pos:pos + len(norm_quote)]
+    after = norm_content[pos + len(norm_quote):end].strip()
+
+    if start > 0:
+        before = "..." + before
+    if end < len(norm_content):
+        after = after + "..."
+
+    return {"before": before, "quoted": matched_text, "after": after, "matched": True}
+
+
+def _extract_reply_text(reply: dict) -> str:
+    """Extract plain text from a comment reply's content elements."""
+    elements = reply.get("content", {}).get("elements", [])
+    parts = []
+    for el in elements:
+        if el.get("type") == "text_run":
+            parts.append(el.get("text_run", {}).get("text", ""))
+        elif el.get("type") == "person":
+            parts.append(f"@{el.get('person', {}).get('user_id', '?')}")
+        elif el.get("type") == "docs_link":
+            parts.append(el.get("docs_link", {}).get("url", "[link]"))
+    return "".join(parts) or "(empty)"
+
+
 def _build_descendant_payload(items: list[dict]) -> tuple[list[str], list[dict]]:
     """Build Feishu descendant API payload from flat list items with depth.
 
@@ -722,6 +768,75 @@ class FeishuAPI:
             last_reply = data.get("data", {}).get("reply", {})
 
         return {"ok": True, "reply": last_reply, "parts": len(chunks)}
+
+    async def analyze_comments(
+        self,
+        document_id: str,
+        show_all: bool = False,
+        context_chars: int = 200,
+    ) -> dict:
+        """Assemble document content + comments into structured analysis context.
+
+        Returns structured JSON with:
+        - doc_id, title, stats
+        - annotations: each comment with quote, surrounding context, thread
+        """
+        # 1. Get document content and title
+        doc_content = await self.get_document_content(document_id)
+
+        meta_data = await self._raw_request(
+            "GET", f"/open-apis/docx/v1/documents/{document_id}"
+        )
+        doc_title = meta_data.get("data", {}).get("document", {}).get("title", document_id)
+
+        # 2. Get comments (already paginated)
+        all_comments = await self.list_comments(document_id)
+        if all_comments and "error" in all_comments[0]:
+            return {"error": all_comments[0]["error"]}
+
+        # 3. Filter
+        if not show_all:
+            all_comments = [c for c in all_comments if not c.get("is_resolved")]
+
+        if not all_comments:
+            return {
+                "doc_id": document_id,
+                "title": doc_title,
+                "annotations": [],
+                "stats": {"shown": 0, "filter": "all" if show_all else "unresolved"},
+            }
+
+        # 4. Anchor each comment and build annotations
+        annotations = []
+        for c in all_comments:
+            quote = c.get("quote", "")
+            context = _anchor_quote(doc_content, quote, context_chars)
+
+            thread = []
+            for r in c.get("replies", []):
+                thread.append({
+                    "user_id": r.get("user_id", "?"),
+                    "text": r.get("content", ""),
+                    "reply_id": r.get("reply_id", ""),
+                })
+
+            annotations.append({
+                "comment_id": c["comment_id"],
+                "resolved": c.get("is_resolved", False),
+                "quote": quote,
+                "context": context,
+                "thread": thread,
+            })
+
+        return {
+            "doc_id": document_id,
+            "title": doc_title,
+            "stats": {
+                "shown": len(annotations),
+                "filter": "all" if show_all else "unresolved",
+            },
+            "annotations": annotations,
+        }
 
     async def update_document(self, document_id: str, content: str) -> dict:
         """Replace all document content (keeps title).

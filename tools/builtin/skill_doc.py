@@ -22,7 +22,7 @@ _api: Any = None
 
 DOC_ACTIONS = {
     "create", "read", "append", "update", "replace_section", "search",
-    "list_comments", "reply_comment", "transfer_owner", "send_message",
+    "list_comments", "analyze_comments", "reply_comment", "transfer_owner", "send_message",
 }
 
 
@@ -44,7 +44,7 @@ async def feishu_doc(action: str, params: dict) -> dict:
 
     Args:
         action: One of create, read, append, update, replace_section, search,
-                list_comments, reply_comment, transfer_owner, send_message
+                list_comments, analyze_comments, reply_comment, transfer_owner, send_message
         params: Action-specific parameters (see tool description)
     """
     api = _require_api()
@@ -113,6 +113,14 @@ async def feishu_doc(action: str, params: dict) -> dict:
         validate_required(params, ["document_id"])
         comments = await api.list_comments(params["document_id"])
         return {"comments": comments}
+
+    elif action == "analyze_comments":
+        validate_required(params, ["document_id"])
+        return await api.analyze_comments(
+            params["document_id"],
+            show_all=params.get("show_all", False),
+            context_chars=params.get("context_chars", 200),
+        )
 
     elif action == "reply_comment":
         validate_required(params, ["document_id", "comment_id", "content"])

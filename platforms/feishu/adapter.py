@@ -30,6 +30,7 @@ from platforms.feishu.contacts import ContactStore
 from platforms.feishu.dispatcher import FeishuDispatcher
 from platforms.feishu.media import MediaHandler
 from platforms.feishu.tags import wrap_user_input, inject_notifications, parse_output
+from tools.builtin._user_context import set_current_user_id
 
 log = logging.getLogger("agentic.feishu.adapter")
 
@@ -266,6 +267,9 @@ class FeishuAdapter:
         self._feishu_api = api
         if api:
             self._contacts.set_api(api)
+            # Expose ContactStore to skill tools
+            from tools.builtin._user_context import set_contacts
+            set_contacts(self._contacts)
 
     # ── Lifecycle ──────────────────────────────────────────────────
 
@@ -894,6 +898,9 @@ class FeishuAdapter:
                 on_turn_start=on_turn_start,
             )
 
+            # Set user context so skill tools can auto-add collaborator
+            _user_ctx_token = set_current_user_id(sender_id)
+
             # Run agent loop (with wrapped prompt)
             result = await self._loop.run(
                 prompt=wrapped_prompt,
@@ -903,6 +910,9 @@ class FeishuAdapter:
                 callbacks=callbacks,
                 provider=effective_provider,
             )
+
+            # Reset user context
+            set_current_user_id("")
 
             # Stop pulse
             if pulse_task:
@@ -983,19 +993,20 @@ class FeishuAdapter:
                 effective_config.model,
             )
 
-        except Exception:
+        except Exception as exc:
             log.exception("Error processing message from %s in %s", sender_id, chat_id)
+            # Extract the most informative error line
+            err_type = type(exc).__name__
+            err_msg = str(exc).split("\n")[0][:200]  # first line, cap length
+            error_text = (
+                "{{card:header=处理出错,color=red}}\n"
+                "抱歉，处理消息时发生错误，请稍后重试。\n"
+                f"`{err_type}: {err_msg}`"
+            )
             if thinking_id:
-                await self._dispatcher.update_card(
-                    thinking_id,
-                    "{{card:header=处理出错,color=red}}\n抱歉，处理消息时发生错误，请稍后重试。",
-                )
+                await self._dispatcher.update_card(thinking_id, error_text)
             else:
-                await self._dispatcher.send_card(
-                    chat_id,
-                    "{{card:header=处理出错,color=red}}\n抱歉，处理消息时发生错误，请稍后重试。",
-                    reply_to,
-                )
+                await self._dispatcher.send_card(chat_id, error_text, reply_to)
         finally:
             if pulse_task and not pulse_task.done():
                 pulse_task.cancel()

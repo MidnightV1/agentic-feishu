@@ -7,6 +7,7 @@ import logging
 from typing import Any
 
 from core.tool_registry import tool
+from tools.builtin._user_context import resolve_user
 from tools.common.url_parser import extract_token
 from tools.common.validators import validate_required, validate_enum, validate_action, VALID_PERM_TYPES
 
@@ -60,7 +61,7 @@ async def feishu_perm(action: str, params: dict = {}) -> dict | list:
         validate_required(params, ["doc_token", "member_id"])
         validate_enum(params.get("perm", "full_access"), VALID_PERM_TYPES, "perm")
         doc_token = params.get("doc_token", "")
-        member_id = params.get("member_id", "")
+        member_id = resolve_user(params.get("member_id", ""))
         perm = params.get("perm", "full_access")
         member_type = params.get("member_type", "openid")
         doc_type = params.get("doc_type", "docx")
@@ -69,7 +70,7 @@ async def feishu_perm(action: str, params: dict = {}) -> dict | list:
     elif action == "remove":
         validate_required(params, ["doc_token", "member_id"])
         doc_token = params.get("doc_token", "")
-        member_id = params.get("member_id", "")
+        member_id = resolve_user(params.get("member_id", ""))
         member_type = params.get("member_type", "openid")
         doc_type = params.get("doc_type", "docx")
         return await api.remove_collaborator(doc_token, member_id, member_type, doc_type)

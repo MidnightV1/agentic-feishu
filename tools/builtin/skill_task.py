@@ -7,10 +7,14 @@ import logging
 from typing import Any
 
 from core.tool_registry import tool
+from tools.builtin._user_context import resolve_user
+from tools.common.validators import validate_required, validate_action
 
 log = logging.getLogger("agentic.tools.task")
 
 _api: Any = None
+
+TASK_ACTIONS = {"create", "get", "list", "update", "complete", "delete", "assign", "unassign", "snapshot"}
 
 
 def configure(api: Any) -> None:
@@ -25,24 +29,7 @@ def _require_api() -> Any:
     return _api
 
 
-@tool(
-    summary="Feishu task operations: create, get, list, update, complete, delete, assign, unassign, snapshot",
-    deferred=True,
-    description="""Feishu task operations.
-
-Actions:
-- create: Create task. params: {title, due_date?, description?}
-  Due date auto-converts from ISO/natural format. Infer from context (e.g., '下周五' → concrete date).
-- get: Get task details. params: {task_id}
-- list: List tasks. params: {completed?=false}
-- update: Update task. params: {task_id, title?, due_date?, description?}
-- complete: Mark complete. params: {task_id}
-- delete: Delete task (IRREVERSIBLE — confirm with user first). params: {task_id}
-- assign: Assign users. params: {task_id, open_ids} (comma-separated open_ids string)
-- unassign: Unassign users. params: {task_id, open_ids} (comma-separated open_ids string)
-- snapshot: Get categorized overview of all open tasks. No params needed.
-""", parallel_safe=False,
-)
+@tool(deferred=True, parallel_safe=False)
 async def feishu_task(action: str, params: dict = {}) -> dict | str | list:
     """Dispatch Feishu task operations by action name.
 
@@ -51,8 +38,10 @@ async def feishu_task(action: str, params: dict = {}) -> dict | str | list:
         params: Action-specific parameters (see description)
     """
     api = _require_api()
+    validate_action(action, TASK_ACTIONS, "feishu_task")
 
     if action == "create":
+        validate_required(params, ["title"])
         result = await api.create_task(
             title=params["title"],
             due_date=params.get("due_date", ""),
@@ -61,6 +50,7 @@ async def feishu_task(action: str, params: dict = {}) -> dict | str | list:
         return result
 
     elif action == "get":
+        validate_required(params, ["task_id"])
         result = await api.get_task(params["task_id"])
         return result
 
@@ -69,6 +59,7 @@ async def feishu_task(action: str, params: dict = {}) -> dict | str | list:
         return tasks
 
     elif action == "update":
+        validate_required(params, ["task_id"])
         result = await api.update_task(
             task_id=params["task_id"],
             title=params.get("title", ""),
@@ -82,24 +73,29 @@ async def feishu_task(action: str, params: dict = {}) -> dict | str | list:
         return result
 
     elif action == "delete":
+        validate_required(params, ["task_id"])
+        if not params.get("confirmed"):
+            return {
+                "status": "confirmation_required",
+                "message": f"删除任务不可恢复。确认删除任务 {params['task_id']}？请重新调用并设置 confirmed=true",
+                "action": action,
+                "params": params,
+            }
         result = await api.delete_task(params["task_id"])
         return result
 
     elif action == "assign":
-        ids = [uid.strip() for uid in params["open_ids"].split(",") if uid.strip()]
+        validate_required(params, ["task_id", "open_ids"])
+        ids = [resolve_user(uid.strip()) for uid in params["open_ids"].split(",") if uid.strip()]
         result = await api.assign_task(params["task_id"], ids)
         return result
 
     elif action == "unassign":
-        ids = [uid.strip() for uid in params["open_ids"].split(",") if uid.strip()]
+        validate_required(params, ["task_id", "open_ids"])
+        ids = [resolve_user(uid.strip()) for uid in params["open_ids"].split(",") if uid.strip()]
         result = await api.unassign_task(params["task_id"], ids)
         return result
 
     elif action == "snapshot":
         result = await api.task_snapshot()
         return result
-
-    else:
-        raise ValueError(
-            f"Unknown action '{action}'. Valid actions: create, get, list, update, complete, delete, assign, unassign, snapshot"
-        )

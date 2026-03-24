@@ -1,13 +1,20 @@
 # -*- coding: utf-8 -*-
-"""Hub operations skill — scheduler CRUD, service status."""
+"""Hub operations skill — scheduler CRUD, service status.
+
+CLI script for skill invocation. No @tool registration.
+
+CLI usage:
+    python3 skills/hub-ops/tools.py <action> --params '<json>'
+"""
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
+import sys
 from datetime import datetime
 from typing import Any
-
-from core.tool_registry import tool
 
 log = logging.getLogger("agentic.skills.hub_ops")
 
@@ -29,24 +36,6 @@ def _require_scheduler() -> Any:
     return _scheduler
 
 
-@tool(
-    summary="Hub operations: job_list, job_enable, job_disable, scheduler_reload, service_status",
-    deferred=True,
-    description="""Hub service management and scheduled job operations.
-
-Actions:
-- job_list: List all scheduled jobs (enabled + disabled). No params.
-- job_enable: Enable a job. params: {name: str}
-- job_disable: Disable a job. params: {name: str}
-- scheduler_reload: Hot-reload scheduler configs from running state. No params.
-- service_status: Show service uptime and scheduler summary. No params.
-
-Notes:
-- Job creation/deletion requires code changes (handlers are async functions).
-  Use job_enable/job_disable for runtime control.
-- scheduler_reload preserves handlers but updates schedule/enabled state.
-""",
-)
 async def hub_ops(action: str, params: dict = {}) -> dict | str:
     """Dispatch hub operations by action name.
 
@@ -91,7 +80,6 @@ async def hub_ops(action: str, params: dict = {}) -> dict | str:
         return {"success": ok, "message": f"Job '{name}' disabled" if ok else f"Job '{name}' not found"}
 
     elif action == "scheduler_reload":
-        # Trigger reload (no-op if no config changes)
         job_count = len(scheduler.list_jobs(include_disabled=True))
         return {"message": "Scheduler state refreshed", "job_count": job_count}
 
@@ -118,3 +106,18 @@ async def hub_ops(action: str, params: dict = {}) -> dict | str:
                 "scheduler_reload", "service_status",
             ],
         }
+
+
+# -- CLI entry point ---------------------------------------------------------
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Hub operations")
+    parser.add_argument("action", choices=["job_list", "job_enable", "job_disable", "scheduler_reload", "service_status"])
+    parser.add_argument("--params", default="{}", help="JSON params")
+    args = parser.parse_args()
+
+    # Note: CLI mode requires scheduler to be injected externally.
+    # This entry point is for in-process invocation via bash tool.
+    print(json.dumps({"error": "hub-ops CLI requires in-process scheduler; use via agent bash tool"}, ensure_ascii=False))

@@ -1,16 +1,21 @@
 # -*- coding: utf-8 -*-
-"""Feishu calendar skill — consolidated tool for all calendar operations.
+"""Feishu calendar skill — CLI script for all calendar operations.
 
-All calendar actions are dispatched through a single `feishu_cal` entry point.
+Called by LLM via bash tool. No @tool registration.
 Requires a configured FeishuAPI instance set via `configure(api)`.
+
+CLI usage:
+    python3 tools/builtin/skill_cal.py <action> --params '<json>'
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
+import sys
 from typing import Any
 
-from core.tool_registry import tool
 from tools.builtin._user_context import resolve_user
 from tools.common.validators import validate_required, validate_action
 
@@ -37,7 +42,6 @@ def _require_api() -> Any:
     return _api
 
 
-@tool(deferred=True, parallel_safe=False)
 async def feishu_cal(action: str, params: dict = {}) -> dict | list:
     """Unified Feishu calendar tool.
 
@@ -51,7 +55,6 @@ async def feishu_cal(action: str, params: dict = {}) -> dict | list:
     if action == "create":
         validate_required(params, ["summary", "start_time", "end_time"])
         attendees = params.get("attendees")
-        # Normalize attendees: accept names, open_ids, or dicts
         if attendees is not None:
             normalized = []
             for item in attendees:
@@ -126,3 +129,34 @@ async def feishu_cal(action: str, params: dict = {}) -> dict | list:
         raw_ids = params.get("attendee_ids", "")
         ids = [uid.strip() for uid in raw_ids.split(",") if uid.strip()] if isinstance(raw_ids, str) else raw_ids
         return await api.remove_event_attendees(params["event_id"], ids)
+
+
+# -- CLI entry point ---------------------------------------------------------
+
+async def _cli_main() -> None:
+    """CLI entry: python3 skill_cal.py <action> --params '<json>'"""
+    import argparse
+    from config.settings import load_settings
+    from platforms.feishu.api import FeishuAPI
+
+    parser = argparse.ArgumentParser(description="Feishu calendar operations")
+    parser.add_argument("action", choices=sorted(CAL_ACTIONS))
+    parser.add_argument("--params", default="{}", help="JSON params")
+    args = parser.parse_args()
+
+    params = json.loads(args.params)
+
+    settings = load_settings()
+    api = FeishuAPI(app_id=settings.feishu.app_id, app_secret=settings.feishu.app_secret)
+    await api.start()
+    configure(api)
+
+    try:
+        result = await feishu_cal(args.action, params)
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    finally:
+        await api.stop()
+
+
+if __name__ == "__main__":
+    asyncio.run(_cli_main())

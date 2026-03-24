@@ -75,27 +75,26 @@ async def main() -> None:
     # ── Tool registry ─────────────────────────────────────────────
     registry = ToolRegistry()
 
-    # Auto-discover built-in tools
+    # Auto-discover built-in tools (general_tools only — no skill tools)
     n = registry.discover(general_tools)
     log.info("Registered %d general tools", n)
 
-    # ── Feishu API + skill-style tools ────────────────────────────
+    # ── Feishu API — configure skill modules for in-process use ───
     feishu_api = FeishuAPI(
         app_id=settings.feishu.app_id,
         app_secret=settings.feishu.app_secret,
     )
     await feishu_api.start()
 
+    # Configure API client on skill modules (for in-process calls).
+    # No @tool registration — LLM invokes skills via bash tool + CLI scripts.
     _skill_modules = [
         skill_doc, skill_task, skill_cal,
         skill_bitable, skill_sheet, skill_drive, skill_perm,
     ]
-    total = 0
     for mod in _skill_modules:
         mod.configure(feishu_api)
-        n = registry.discover(mod)
-        total += n
-    log.info("Registered %d Feishu skill tools", total)
+    log.info("Configured %d Feishu skill modules (no tool registration)", len(_skill_modules))
 
     # ── Custom tools (auto-discover) ─────────────────────────────
     custom_dir = Path(__file__).parent / "tools" / "custom"
@@ -104,20 +103,18 @@ async def main() -> None:
         if n:
             log.info("Discovered %d custom tools", n)
 
-    # ── Skills ────────────────────────────────────────────────────
+    # ── Skills (document-injection mode) ──────────────────────────
     skills_dir = Path(__file__).parent / "skills"
-    skill_registry = load_skills(skills_dir, registry)
+    skill_registry = load_skills(skills_dir)
 
     log.info("Tools available: %s", registry.list_tools())
 
     # ── Context manager ───────────────────────────────────────────
-    # If compress_provider is configured, use it as primary compressor
-    # with the default provider as fallback (like Hub's Sonnet → Gemini strategy).
     compress_primary = provider
     compress_fallback = None
     if settings.compress_provider:
         compress_primary = create_provider(settings, settings.compress_provider)
-        compress_fallback = provider  # default provider as safety net
+        compress_fallback = provider
     context_mgr = ContextManager(
         compress_primary,
         ContextConfig(compress_threshold=settings.context_compress_threshold),
@@ -179,8 +176,7 @@ async def main() -> None:
     goal_tree = GoalTree(os.path.join(settings.data_dir, "goal_tree.yaml"))
     memory_store = MemoryStore(os.path.join(settings.data_dir, "memory"))
 
-    # Notify target: first bot's dispatcher.send_to_user (wired after bots start)
-    _explorer_notify_fn = None  # set after first bot dispatcher is ready
+    _explorer_notify_fn = None
     _owner_open_id = os.environ.get("FEISHU_OWNER_OPEN_ID", "")
 
     explorer_engine = ExplorerEngine(
@@ -192,8 +188,6 @@ async def main() -> None:
     )
 
     # ── Heartbeat + Scheduler ─────────────────────────────────────
-    # Create lightweight providers for heartbeat triage/action layers.
-    # Uses deepseek-chat (non-reasoning) — cheapest available model.
     from providers.openai_provider import OpenAIProvider
     _ds_cfg = settings.deepseek
     _heartbeat_provider = None
@@ -225,7 +219,6 @@ async def main() -> None:
     # ── Build bot configs (multi-bot or legacy single-bot) ────────
     bot_configs: list[BotConfig] = list(settings.bots)
     if not bot_configs:
-        # Legacy: single bot from feishu config
         bot_configs = [BotConfig(
             name="main",
             app_id=settings.feishu.app_id,
@@ -237,12 +230,10 @@ async def main() -> None:
 
     for bot_cfg in bot_configs:
         bot_name = bot_cfg.name
-        log.info("Starting bot: %s (app_id=%s…)", bot_name, bot_cfg.app_id[:8] if bot_cfg.app_id else "?")
+        log.info("Starting bot: %s (app_id=%s...)", bot_name, bot_cfg.app_id[:8] if bot_cfg.app_id else "?")
 
-        # Per-bot context
         bot_context = BotContext(bot_name, os.path.join(settings.data_dir, "bots"))
 
-        # Per-bot run config (provider/model override)
         bot_provider = bot_cfg.provider or settings.default_provider
         bot_model = bot_cfg.model or getattr(getattr(settings, bot_provider, None), "model", "")
         bot_run_config = RunConfig(
@@ -254,21 +245,17 @@ async def main() -> None:
             stream=settings.stream_output,
         )
 
-        # Per-bot provider + agent loop
         bot_provider_instance = create_provider(settings, bot_provider)
         bot_agent_loop = AgentLoop(bot_provider_instance, registry, context_mgr)
 
-        # Per-bot dispatcher
         bot_dispatcher = FeishuDispatcher(
             app_id=bot_cfg.app_id,
             app_secret=bot_cfg.app_secret,
         )
         await bot_dispatcher.start()
 
-        # Per-bot media handler
         bot_feishu_api = FeishuAPI(app_id=bot_cfg.app_id, app_secret=bot_cfg.app_secret)
         await bot_feishu_api.start()
-        # Build PDF analyzer callback using Gemini API (for scanned/image-based PDFs)
         _pdf_analyzer = None
         if settings.gemini.api_key:
             from google import genai as _genai
@@ -307,7 +294,6 @@ async def main() -> None:
             pdf_analyzer=_pdf_analyzer,
         )
 
-        # Context assembler (pulls from all layers)
         assembler = ContextAssembler(
             org=org_context,
             bot=bot_context,
@@ -318,9 +304,9 @@ async def main() -> None:
             platform_prompt=FEISHU_SYSTEM_PROMPT,
             tool_guidelines=tool_guidelines,
             skill_descriptions=skill_descriptions,
+            skill_registry=skill_registry,
         )
 
-        # Adapter
         adapter = FeishuAdapter(
             app_id=bot_cfg.app_id,
             app_secret=bot_cfg.app_secret,
@@ -341,14 +327,11 @@ async def main() -> None:
         await adapter.start()
         adapters.append(adapter)
 
-        # Wire explorer notification to first bot's dispatcher
         if not explorer_engine._notify and bot_dispatcher:
             explorer_engine._notify = bot_dispatcher.send_to_user
             log.info("Explorer notification wired to bot '%s'", bot_name)
 
     log.info("All %d bot(s) started", len(adapters))
-
-
 
     log.info("agentic-feishu ready — %d bot(s) listening", len(adapters))
 
@@ -370,7 +353,6 @@ async def main() -> None:
         await scheduler.stop()
         for adapter in adapters:
             await adapter.stop()
-        await dispatcher.stop()
         await feishu_api.stop()
         await session_store.close()
         log.info("agentic-feishu stopped")

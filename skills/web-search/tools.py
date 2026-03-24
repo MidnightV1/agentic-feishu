@@ -1,13 +1,20 @@
 # -*- coding: utf-8 -*-
-"""Web search skill — Gemini grounding search for web and news."""
+"""Web search skill — Gemini grounding search for web and news.
+
+CLI script for skill invocation. No @tool registration.
+
+CLI usage:
+    python3 skills/web-search/tools.py <action> --params '<json>'
+"""
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import os
+import sys
 from typing import Any
-
-from core.tool_registry import tool
 
 log = logging.getLogger("agentic.skills.web_search")
 
@@ -28,7 +35,6 @@ async def _gemini_grounded_search(query: str, mode: str = "web") -> dict:
 
     client = genai.Client(api_key=api_key)
 
-    # For news, bias the query
     effective_query = f"latest news: {query}" if mode == "news" else query
 
     try:
@@ -41,18 +47,16 @@ async def _gemini_grounded_search(query: str, mode: str = "web") -> dict:
             ),
         )
 
-        # Extract grounding metadata
         result: dict[str, Any] = {"query": query, "mode": mode}
 
         if response.text:
             result["answer"] = response.text
 
-        # Extract search sources from grounding metadata
         metadata = getattr(response.candidates[0], "grounding_metadata", None)
         if metadata:
             chunks = getattr(metadata, "grounding_chunks", [])
             sources = []
-            for chunk in chunks[:10]:  # limit to top 10 sources
+            for chunk in chunks[:10]:
                 web = getattr(chunk, "web", None)
                 if web:
                     sources.append({
@@ -69,21 +73,6 @@ async def _gemini_grounded_search(query: str, mode: str = "web") -> dict:
         return {"error": f"{type(e).__name__}: {e}"}
 
 
-@tool(
-    summary="Web search: search_web, search_news (Gemini grounding)",
-    deferred=True,
-    description="""Web search using Gemini Google Search grounding.
-
-Actions:
-- search_web: General web search. params: {query: str}
-  Returns an AI-synthesized answer with source URLs.
-- search_news: News-focused search. params: {query: str}
-  Same as search_web but biased toward recent news results.
-
-The search uses Gemini's built-in Google Search grounding tool,
-which provides real-time web results synthesized into a coherent answer.
-""",
-)
 async def web_search(action: str, params: dict = {}) -> dict:
     """Dispatch web search operations.
 
@@ -104,3 +93,22 @@ async def web_search(action: str, params: dict = {}) -> dict:
             "error": f"Unknown action '{action}'",
             "valid_actions": ["search_web", "search_news"],
         }
+
+
+# -- CLI entry point ---------------------------------------------------------
+
+async def _cli_main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Web search")
+    parser.add_argument("action", choices=["search_web", "search_news"])
+    parser.add_argument("--params", default="{}", help="JSON params")
+    args = parser.parse_args()
+
+    params = json.loads(args.params)
+    result = await web_search(args.action, params)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+if __name__ == "__main__":
+    asyncio.run(_cli_main())

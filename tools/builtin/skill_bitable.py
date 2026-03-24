@@ -1,12 +1,20 @@
 # -*- coding: utf-8 -*-
-"""Skill-style Bitable meta-tool — consolidates all Bitable operations into one tool."""
+"""Feishu Bitable operations — CLI script for skill invocation.
+
+Called by LLM via bash tool. No @tool registration.
+
+CLI usage:
+    python3 tools/builtin/skill_bitable.py <action> --params '<json>'
+"""
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
+import sys
 from typing import Any
 
-from core.tool_registry import tool
 from tools.builtin._user_context import get_current_user_id
 from tools.common.url_parser import extract_token, extract_bitable_table_id
 from tools.common.validators import validate_required, validate_action
@@ -30,7 +38,6 @@ def _require_api() -> Any:
     return _api
 
 
-@tool(deferred=True, parallel_safe=False)
 async def feishu_bitable(action: str, params: dict = {}) -> dict | list:
     """Dispatch Bitable operations by action name.
 
@@ -98,3 +105,34 @@ async def feishu_bitable(action: str, params: dict = {}) -> dict | list:
         table_id = params.get("table_id", "")
         record_id = params.get("record_id", "")
         return await api.delete_bitable_record(app_token, table_id, record_id)
+
+
+# -- CLI entry point ---------------------------------------------------------
+
+async def _cli_main() -> None:
+    """CLI entry: python3 skill_bitable.py <action> --params '<json>'"""
+    import argparse
+    from config.settings import load_settings
+    from platforms.feishu.api import FeishuAPI
+
+    parser = argparse.ArgumentParser(description="Feishu Bitable operations")
+    parser.add_argument("action", choices=sorted(BITABLE_ACTIONS))
+    parser.add_argument("--params", default="{}", help="JSON params")
+    args = parser.parse_args()
+
+    params = json.loads(args.params)
+
+    settings = load_settings()
+    api = FeishuAPI(app_id=settings.feishu.app_id, app_secret=settings.feishu.app_secret)
+    await api.start()
+    configure(api)
+
+    try:
+        result = await feishu_bitable(args.action, params)
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    finally:
+        await api.stop()
+
+
+if __name__ == "__main__":
+    asyncio.run(_cli_main())

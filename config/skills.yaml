@@ -1,0 +1,54 @@
+# Skill global config — ops switches, not feature declarations (those live in SKILL.md)
+#
+# Fields:
+#   system: true     System-level, cannot be disabled by user
+#   enabled: true    Whether enabled (ignored when system=true)
+#   bots: []         Bind to specific bots (empty = all)
+#   triggers: []     Regex trigger patterns
+#   display_name:    Display name (optional)
+#   priority: 0      Match priority (higher = first)
+
+skills:
+  # -- Feishu system-level --
+  feishu_doc:
+    system: true
+
+  feishu_cal:
+    system: true
+
+  feishu_task:
+    system: true
+
+  feishu_drive:
+    system: true
+
+  feishu_perm:
+    system: true
+
+  feishu_bitable:
+    system: true
+
+  feishu_sheet:
+    system: true
+
+  feishu_contacts:
+    system: true
+
+  # -- Feature skills --
+  hub-ops:
+    display_name: Hub Operations
+    triggers:
+      - "定时任务|cron|调度|服务状态|重启|scheduler|任务列表"
+    priority: 5
+
+  web-search:
+    display_name: Web Search
+    triggers:
+      - "搜索|search|查一下|搜一下|找一下|查找"
+    priority: 3
+
+  arxiv-tracker:
+    display_name: ArXiv Tracker
+    triggers:
+      - "arxiv|论文|paper|学术|research"
+    priority: 3

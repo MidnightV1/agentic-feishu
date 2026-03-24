@@ -21,9 +21,20 @@ https://xxx.feishu.cn/base/AbCdEfG123?table=tblXXX&view=vewYYY
 - `table_id` = `tblXXX`（query param `table=`，以 `tbl` 开头）
 - `view` 参数可忽略，query 时可选传
 
+## CLI 调用方式
+
+```bash
+cd ~/Agent\ Space/agentic-feishu && python3 tools/builtin/skill_bitable.py <action> --params '<json>'
+```
+
+示例：
+```bash
+python3 tools/builtin/skill_bitable.py list_tables --params '{"app_token": "xxx"}'
+```
+
 ## Actions
 
-调用方式：`feishu_bitable(action, params)`
+调用方式：`python3 tools/builtin/skill_bitable.py <action> --params '<json>'`
 
 - **create** — 创建 Bitable 应用。params: `{name, folder_token?}`。创建后自动调用 feishu_perm 将请求用户加为 full_access 协作者（失败不阻断）。
 - **list_tables** — 列出应用中的所有表格。params: `{app_token}`。

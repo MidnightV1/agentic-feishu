@@ -18,9 +18,20 @@ Sheet ≠ Bitable。**Sheet** 是基于单元格的电子表格（电子表格�
 - **Range format** — `"A1:B5"`（矩形区域）、`"A:C"`（整列）、`"1:3"`（整行）。未指定时默认 `"A1:Z100"`。
 - **Values** — 二维数组，行 × 列。例如 `[["header1","header2"],["val1","val2"]]`。支持字符串、数字、布尔、null。
 
+## CLI 调用方式
+
+```bash
+cd ~/Agent\ Space/agentic-feishu && python3 tools/builtin/skill_sheet.py <action> --params '<json>'
+```
+
+示例：
+```bash
+python3 tools/builtin/skill_sheet.py info --params '{"spreadsheet_token": "xxx"}'
+```
+
 ## Actions
 
-调用方式：`feishu_sheet(action, params)`
+调用方式：`python3 tools/builtin/skill_sheet.py <action> --params '<json>'`
 
 - **`create`** — 创建电子表格。params: `{title, folder_token?}`。创建后自动通过 feishu_perm 将请求用户加为 full_access 协作者（非阻塞，失败不影响主流程）。
 - **`info`** — 获取电子表格元数据（标题、工作表列表及各 sheet_id）。**不知道 sheet_id 时必须先调此接口。** params: `{spreadsheet_token}`。

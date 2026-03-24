@@ -21,9 +21,20 @@ Bot 拥有独立日历，创建的日程用户可见。涉及用户的事件必�
 | tomorrow | `tomorrow 10:00` | 明天指定时刻 |
 | 相对偏移 | `+2h` / `+30m` | 从当前时刻起偏移 |
 
+## CLI 调用方式
+
+```bash
+cd ~/Agent\ Space/agentic-feishu && python3 tools/builtin/skill_cal.py <action> --params '<json>'
+```
+
+示例：
+```bash
+python3 tools/builtin/skill_cal.py list --params '{"days": 7}'
+```
+
 ## Actions
 
-调用方式：`feishu_cal(action, params)`
+调用方式：`python3 tools/builtin/skill_cal.py <action> --params '<json>'`
 
 - **create** — 创建日程。params: `{summary, start_time, end_time, description?, attendees?}`。必须将请求用户（消息上下文中的 open_id）加为参会人，确保日程出现在用户日历中。创建后必须告知用户（标题 + 时间）。`attendees` 接受：CSV 字符串、字符串列表、或字典列表（自动提取 open_id），代码自动归一化为字符串列表。
 

@@ -1,12 +1,20 @@
 # -*- coding: utf-8 -*-
-"""Skill-style Drive meta-tool — consolidates all Drive operations into one tool."""
+"""Feishu Drive operations — CLI script for skill invocation.
+
+Called by LLM via bash tool. No @tool registration.
+
+CLI usage:
+    python3 tools/builtin/skill_drive.py <action> --params '<json>'
+"""
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
+import sys
 from typing import Any
 
-from core.tool_registry import tool
 from tools.common.url_parser import extract_token
 from tools.common.validators import validate_required, validate_action
 
@@ -29,7 +37,6 @@ def _require_api() -> Any:
     return _api
 
 
-@tool(deferred=True, parallel_safe=False)
 async def feishu_drive(action: str, params: dict = {}) -> dict | list:
     """Dispatch Drive operations by action name.
 
@@ -99,3 +106,34 @@ async def feishu_drive(action: str, params: dict = {}) -> dict | list:
         file_token = params.get("file_token", "")
         file_type = params.get("file_type", "docx")
         return await api.delete_drive_file(file_token, file_type)
+
+
+# -- CLI entry point ---------------------------------------------------------
+
+async def _cli_main() -> None:
+    """CLI entry: python3 skill_drive.py <action> --params '<json>'"""
+    import argparse
+    from config.settings import load_settings
+    from platforms.feishu.api import FeishuAPI
+
+    parser = argparse.ArgumentParser(description="Feishu Drive operations")
+    parser.add_argument("action", choices=sorted(DRIVE_ACTIONS))
+    parser.add_argument("--params", default="{}", help="JSON params")
+    args = parser.parse_args()
+
+    params = json.loads(args.params)
+
+    settings = load_settings()
+    api = FeishuAPI(app_id=settings.feishu.app_id, app_secret=settings.feishu.app_secret)
+    await api.start()
+    configure(api)
+
+    try:
+        result = await feishu_drive(args.action, params)
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    finally:
+        await api.stop()
+
+
+if __name__ == "__main__":
+    asyncio.run(_cli_main())

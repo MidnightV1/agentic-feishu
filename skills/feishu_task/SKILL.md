@@ -15,9 +15,20 @@ description: 飞书任务（承诺与待办追踪）。用于创建、查看、�
 
 **与日历的边界**：日历管理时间锚点（有开始/结束、需要"在场"的事件），任务管理承诺追踪（有状态流转、需要"做完"的事项）。
 
+## CLI 调用方式
+
+```bash
+cd ~/Agent\ Space/agentic-feishu && python3 tools/builtin/skill_task.py <action> --params '<json>'
+```
+
+示例：
+```bash
+python3 tools/builtin/skill_task.py list --params '{}'
+```
+
 ## Actions
 
-调用方式：`feishu_task(action, params)`
+调用方式：`python3 tools/builtin/skill_task.py <action> --params '<json>'`
 
 - **create** — 创建任务。params: `{title, due_date?, description?}`。`due_date` 支持多种格式（见下方 Due Date Formats）。
 - **get** — 获取任务详情。params: `{task_id}`。

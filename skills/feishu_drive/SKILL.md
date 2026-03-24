@@ -21,9 +21,20 @@ description: 飞书云盘/云空间管理。用于列出文件/文件夹、创�
 | `mindnote` | 思维笔记 |
 | `slides` | 幻灯片 |
 
+## CLI 调用方式
+
+```bash
+cd ~/Agent\ Space/agentic-feishu && python3 tools/builtin/skill_drive.py <action> --params '<json>'
+```
+
+示例：
+```bash
+python3 tools/builtin/skill_drive.py list --params '{}'
+```
+
 ## Actions
 
-调用方式：`feishu_drive(action, params)`
+调用方式：`python3 tools/builtin/skill_drive.py <action> --params '<json>'`
 
 - **list** — 列出文件/文件夹。params: `{folder_token?, page_size?=20}`。不传 `folder_token` 则列根目录。
 - **search** — 按关键词搜索文件。params: `{query, count?=10}`。关键词匹配文件名。

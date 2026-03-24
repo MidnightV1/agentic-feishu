@@ -49,9 +49,20 @@ description: 飞书文档（结构化沟通）。用于创建文档（写个文�
 - `{{card:header=...}}` → 移除（仅聊天卡片生效）
 - `:DONE:` `:OK:` 等飞书表情 → 保留原文
 
+## CLI 调用方式
+
+```bash
+cd ~/Agent\ Space/agentic-feishu && python3 tools/builtin/skill_doc.py <action> --params '<json>'
+```
+
+示例：
+```bash
+python3 tools/builtin/skill_doc.py read --params '{"document_id": "xxx"}'
+```
+
 ## Actions
 
-调用方式：`feishu_doc(action, params)`
+调用方式：`python3 tools/builtin/skill_doc.py <action> --params '<json>'`
 
 - **create** — 创建文档。params: `{title, folder_token?}`。创建后必须将请求用户加为 full_access 协作者。返回完整链接 `https://feishu.cn/docx/{document_id}`。
 - **read** — 读取文档内容。params: `{document_id}`。支持传入完整 URL 或裸 document_id。

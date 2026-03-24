@@ -1,14 +1,21 @@
 # -*- coding: utf-8 -*-
-"""ArXiv tracker skill — paper search, topic tracking, summarization."""
+"""ArXiv tracker skill — paper search, topic tracking, summarization.
+
+CLI script for skill invocation. No @tool registration.
+
+CLI usage:
+    python3 skills/arxiv-tracker/tools.py <action> --params '<json>'
+"""
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
+import sys
 import xml.etree.ElementTree as ET
 from typing import Any
 from urllib.parse import quote_plus
-
-from core.tool_registry import tool
 
 log = logging.getLogger("agentic.skills.arxiv_tracker")
 
@@ -21,17 +28,9 @@ async def _arxiv_search(
     sort_by: str = "relevance",
     categories: list[str] | None = None,
 ) -> list[dict]:
-    """Search arXiv API and parse Atom XML response.
-
-    Args:
-        query: Search terms
-        max_results: Max papers to return
-        sort_by: "relevance" or "lastUpdatedDate" or "submittedDate"
-        categories: Optional list of arXiv categories to filter (e.g. ["cs.AI", "cs.CL"])
-    """
+    """Search arXiv API and parse Atom XML response."""
     import httpx
 
-    # Build query string
     search_query = query
     if categories:
         cat_filter = " OR ".join(f"cat:{c}" for c in categories)
@@ -57,7 +56,6 @@ async def _arxiv_search(
         resp = await client.get(ARXIV_API, params=params)
         resp.raise_for_status()
 
-    # Parse Atom XML
     ns = {"atom": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
     root = ET.fromstring(resp.text)
 
@@ -68,27 +66,23 @@ async def _arxiv_search(
         published_el = entry.find("atom:published", ns)
         updated_el = entry.find("atom:updated", ns)
 
-        # Extract arXiv ID from entry id URL
         id_el = entry.find("atom:id", ns)
         arxiv_id = ""
         if id_el is not None and id_el.text:
             arxiv_id = id_el.text.split("/abs/")[-1]
 
-        # Authors
         authors = []
         for author_el in entry.findall("atom:author", ns):
             name_el = author_el.find("atom:name", ns)
             if name_el is not None and name_el.text:
                 authors.append(name_el.text.strip())
 
-        # Categories
         cats = []
         for cat_el in entry.findall("atom:category", ns):
             term = cat_el.get("term", "")
             if term:
                 cats.append(term)
 
-        # PDF link
         pdf_url = ""
         for link_el in entry.findall("atom:link", ns):
             if link_el.get("title") == "pdf":
@@ -97,7 +91,7 @@ async def _arxiv_search(
         paper = {
             "arxiv_id": arxiv_id,
             "title": (title_el.text or "").strip().replace("\n", " ") if title_el is not None else "",
-            "authors": authors[:5],  # limit for readability
+            "authors": authors[:5],
             "author_count": len(authors),
             "summary": (summary_el.text or "").strip()[:500] if summary_el is not None else "",
             "categories": cats,
@@ -111,24 +105,6 @@ async def _arxiv_search(
     return papers
 
 
-@tool(
-    summary="ArXiv operations: search_papers, recent_papers, summarize_paper",
-    deferred=True,
-    description="""ArXiv paper search, tracking, and summarization.
-
-Actions:
-- search_papers: Search arXiv papers. params: {query: str, max_results?: int (default 10), categories?: list[str], sort_by?: "relevance"|"date"|"submitted"}
-  Example categories: ["cs.AI", "cs.CL", "cs.LG", "cs.CV"]
-- recent_papers: Get recent papers in specific categories. params: {categories: list[str], max_results?: int (default 10)}
-  Fetches papers sorted by submission date.
-- summarize_paper: Get detailed info for a specific paper. params: {arxiv_id: str}
-  Returns full abstract and metadata for a single paper.
-
-Common arXiv categories:
-  cs.AI (AI), cs.CL (NLP), cs.LG (Machine Learning), cs.CV (Computer Vision),
-  cs.MA (Multi-Agent), cs.SE (Software Engineering), stat.ML (Statistics ML)
-""",
-)
 async def arxiv_tracker(action: str, params: dict = {}) -> dict:
     """Dispatch arXiv operations.
 
@@ -152,7 +128,6 @@ async def arxiv_tracker(action: str, params: dict = {}) -> dict:
         categories = params.get("categories", [])
         if not categories:
             return {"error": "Missing param: categories (list of arXiv category codes)"}
-        # Search with wildcard query sorted by date
         papers = await _arxiv_search(
             query="*",
             max_results=params.get("max_results", 10),
@@ -165,7 +140,6 @@ async def arxiv_tracker(action: str, params: dict = {}) -> dict:
         arxiv_id = params.get("arxiv_id", "")
         if not arxiv_id:
             return {"error": "Missing param: arxiv_id (e.g. '2401.12345')"}
-        # Fetch single paper by ID
         import httpx
 
         url = f"{ARXIV_API}?id_list={quote_plus(arxiv_id)}"
@@ -207,3 +181,22 @@ async def arxiv_tracker(action: str, params: dict = {}) -> dict:
             "error": f"Unknown action '{action}'",
             "valid_actions": ["search_papers", "recent_papers", "summarize_paper"],
         }
+
+
+# -- CLI entry point ---------------------------------------------------------
+
+async def _cli_main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="ArXiv tracker")
+    parser.add_argument("action", choices=["search_papers", "recent_papers", "summarize_paper"])
+    parser.add_argument("--params", default="{}", help="JSON params")
+    args = parser.parse_args()
+
+    params = json.loads(args.params)
+    result = await arxiv_tracker(args.action, params)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+if __name__ == "__main__":
+    asyncio.run(_cli_main())

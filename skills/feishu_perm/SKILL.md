@@ -11,9 +11,20 @@ description: 飞书文档权限管理。用于添加/移除协作者、设置公
 
 ---
 
+## CLI 调用方式
+
+```bash
+cd ~/Agent\ Space/agentic-feishu && python3 tools/builtin/skill_perm.py <action> --params '<json>'
+```
+
+示例：
+```bash
+python3 tools/builtin/skill_perm.py list --params '{"doc_token": "xxx"}'
+```
+
 ## Actions
 
-调用方式：`feishu_perm(action, params)`
+调用方式：`python3 tools/builtin/skill_perm.py <action> --params '<json>'`
 
 | Action | 说明 | 必填参数 | 可选参数（含默认值） |
 |--------|------|----------|----------------------|

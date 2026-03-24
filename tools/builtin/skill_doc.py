@@ -1,16 +1,21 @@
 # -*- coding: utf-8 -*-
-"""Consolidated Feishu document tool — all document operations via a single dispatch interface.
+"""Feishu document operations — CLI script for skill invocation.
 
-All tools are decorated with @tool and auto-discovered by the ToolRegistry.
+Called by LLM via bash tool. No @tool registration.
 Requires a configured FeishuAPI instance set via `configure(api)`.
+
+CLI usage:
+    python3 tools/builtin/skill_doc.py <action> --params '<json>'
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
+import sys
 from typing import Any
 
-from core.tool_registry import tool
 from tools.builtin._user_context import get_current_user_id
 from tools.common.url_parser import extract_token
 from tools.common.validators import validate_required, validate_action
@@ -39,7 +44,6 @@ def _require_api() -> Any:
     return _api
 
 
-@tool(deferred=True, parallel_safe=False)
 async def feishu_doc(action: str, params: dict) -> dict:
     """Dispatch Feishu document operations by action name.
 
@@ -162,3 +166,34 @@ async def feishu_doc(action: str, params: dict) -> dict:
             params.get("chat_id", ""),
             params.get("text", ""),
         )
+
+
+# -- CLI entry point ---------------------------------------------------------
+
+async def _cli_main() -> None:
+    """CLI entry: python3 skill_doc.py <action> --params '<json>'"""
+    import argparse
+    from config.settings import load_settings
+    from platforms.feishu.api import FeishuAPI
+
+    parser = argparse.ArgumentParser(description="Feishu document operations")
+    parser.add_argument("action", choices=sorted(DOC_ACTIONS))
+    parser.add_argument("--params", default="{}", help="JSON params")
+    args = parser.parse_args()
+
+    params = json.loads(args.params)
+
+    settings = load_settings()
+    api = FeishuAPI(app_id=settings.feishu.app_id, app_secret=settings.feishu.app_secret)
+    await api.start()
+    configure(api)
+
+    try:
+        result = await feishu_doc(args.action, params)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    finally:
+        await api.stop()
+
+
+if __name__ == "__main__":
+    asyncio.run(_cli_main())

@@ -1,12 +1,20 @@
 # -*- coding: utf-8 -*-
-"""Skill-style Sheet meta-tool — consolidates all Spreadsheet operations into one tool."""
+"""Feishu Spreadsheet operations — CLI script for skill invocation.
+
+Called by LLM via bash tool. No @tool registration.
+
+CLI usage:
+    python3 tools/builtin/skill_sheet.py <action> --params '<json>'
+"""
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
+import sys
 from typing import Any
 
-from core.tool_registry import tool
 from tools.builtin._user_context import get_current_user_id
 from tools.common.url_parser import extract_token
 from tools.common.validators import validate_required, validate_action
@@ -30,7 +38,6 @@ def _require_api() -> Any:
     return _api
 
 
-@tool(deferred=True, parallel_safe=False)
 async def feishu_sheet(action: str, params: dict = {}) -> dict | list:
     """Dispatch Spreadsheet operations by action name.
 
@@ -79,3 +86,34 @@ async def feishu_sheet(action: str, params: dict = {}) -> dict | list:
         range_str = params.get("range_str", "")
         values = params.get("values", [])
         return await api.write_sheet_range(spreadsheet_token, sheet_id, range_str, values)
+
+
+# -- CLI entry point ---------------------------------------------------------
+
+async def _cli_main() -> None:
+    """CLI entry: python3 skill_sheet.py <action> --params '<json>'"""
+    import argparse
+    from config.settings import load_settings
+    from platforms.feishu.api import FeishuAPI
+
+    parser = argparse.ArgumentParser(description="Feishu Spreadsheet operations")
+    parser.add_argument("action", choices=sorted(SHEET_ACTIONS))
+    parser.add_argument("--params", default="{}", help="JSON params")
+    args = parser.parse_args()
+
+    params = json.loads(args.params)
+
+    settings = load_settings()
+    api = FeishuAPI(app_id=settings.feishu.app_id, app_secret=settings.feishu.app_secret)
+    await api.start()
+    configure(api)
+
+    try:
+        result = await feishu_sheet(args.action, params)
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    finally:
+        await api.stop()
+
+
+if __name__ == "__main__":
+    asyncio.run(_cli_main())

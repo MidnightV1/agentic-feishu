@@ -228,7 +228,7 @@ class FeishuDispatcher:
         return first_msg_id
 
     async def update_card(self, message_id: str, text: str) -> bool:
-        """Update an existing card message (for streaming)."""
+        """Update an existing card message (for streaming). Retries on transient errors."""
         if not self._client:
             return False
 
@@ -246,12 +246,24 @@ class FeishuDispatcher:
             .build()
         )
 
-        try:
-            resp = await self._client.im.v1.message.apatch(req)
-            return resp.success()
-        except Exception as e:
-            log.warning("Card update failed: %s", e)
-            return False
+        for attempt in range(3):
+            try:
+                resp = await self._client.im.v1.message.apatch(req)
+                if resp.success():
+                    return True
+                # Non-retryable API error
+                log.warning("Card update API error: %s %s", resp.code, resp.msg)
+                return False
+            except (TypeError, ValueError, AttributeError, KeyError):
+                # Programming errors — fail fast, don't retry
+                raise
+            except Exception as e:
+                if attempt < 2:
+                    await asyncio.sleep(1 << attempt)  # 1s, 2s backoff
+                    continue
+                log.warning("Card update failed after 3 attempts: %s", e)
+                return False
+        return False
 
     _RETRY_MAX = 2  # max retries (total 3 attempts)
 

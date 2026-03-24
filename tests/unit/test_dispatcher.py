@@ -317,6 +317,58 @@ class TestButtonGroup:
         assert len(rows[0]["columns"]) == 3
 
 
+class TestUpdateCardRetry:
+    @pytest.mark.asyncio
+    async def test_success_first_try(self, dispatcher):
+        mock_resp = MagicMock()
+        mock_resp.success.return_value = True
+        dispatcher._client.im.v1.message.apatch = AsyncMock(return_value=mock_resp)
+        assert await dispatcher.update_card("msg_1", "text") is True
+        dispatcher._client.im.v1.message.apatch.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_retries_on_transient_error(self, dispatcher):
+        mock_resp = MagicMock()
+        mock_resp.success.return_value = True
+        dispatcher._client.im.v1.message.apatch = AsyncMock(
+            side_effect=[ConnectionError("net"), mock_resp]
+        )
+        assert await dispatcher.update_card("msg_1", "text") is True
+        assert dispatcher._client.im.v1.message.apatch.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_fails_after_3_attempts(self, dispatcher):
+        dispatcher._client.im.v1.message.apatch = AsyncMock(
+            side_effect=ConnectionError("net")
+        )
+        assert await dispatcher.update_card("msg_1", "text") is False
+        assert dispatcher._client.im.v1.message.apatch.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_no_retry_on_programming_error(self, dispatcher):
+        dispatcher._client.im.v1.message.apatch = AsyncMock(
+            side_effect=TypeError("bad arg")
+        )
+        with pytest.raises(TypeError):
+            await dispatcher.update_card("msg_1", "text")
+        dispatcher._client.im.v1.message.apatch.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_api_error_no_retry(self, dispatcher):
+        mock_resp = MagicMock()
+        mock_resp.success.return_value = False
+        mock_resp.code = 99999
+        mock_resp.msg = "error"
+        dispatcher._client.im.v1.message.apatch = AsyncMock(return_value=mock_resp)
+        assert await dispatcher.update_card("msg_1", "text") is False
+        dispatcher._client.im.v1.message.apatch.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_not_started(self):
+        d = FeishuDispatcher("a", "b")
+        assert await d.update_card("msg_1", "text") is False
+
+
 class TestDeleteMessage:
     @pytest.mark.asyncio
     async def test_not_started(self):

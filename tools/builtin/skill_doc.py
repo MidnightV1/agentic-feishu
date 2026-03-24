@@ -22,7 +22,8 @@ _api: Any = None
 
 DOC_ACTIONS = {
     "create", "read", "append", "update", "replace_section", "search",
-    "list_comments", "analyze_comments", "reply_comment", "transfer_owner", "send_message",
+    "list_comments", "analyze_comments", "archive_comments",
+    "reply_comment", "transfer_owner", "send_message",
 }
 
 
@@ -121,6 +122,21 @@ async def feishu_doc(action: str, params: dict) -> dict:
             show_all=params.get("show_all", False),
             context_chars=params.get("context_chars", 200),
         )
+
+    elif action == "archive_comments":
+        validate_required(params, ["document_id"])
+        from infra.comment_archive import CommentArchive
+        analysis = await api.analyze_comments(
+            params["document_id"], show_all=True,
+        )
+        if "error" in analysis:
+            return analysis
+        archive = CommentArchive()
+        count = archive.archive_comments(
+            params["document_id"], analysis.get("annotations", [])
+        )
+        archive.close()
+        return {"archived": count, "doc_id": params["document_id"]}
 
     elif action == "reply_comment":
         validate_required(params, ["document_id", "comment_id", "content"])

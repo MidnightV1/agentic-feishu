@@ -13,6 +13,7 @@ Converts markdown text into Feishu block API format:
 
 from __future__ import annotations
 
+import html
 import re
 from typing import Any
 
@@ -86,8 +87,9 @@ def _strip_html_tags(text: str) -> str:
 
 def _parse_inline(text: str) -> list[dict]:
     """Parse inline markdown (bold, italic, strikethrough, code, link) into Feishu text elements."""
-    # Pre-process: strip HTML tags not supported in doc blocks
+    # Pre-process: strip HTML tags not supported in doc blocks, decode HTML entities
     text = _strip_html_tags(text)
+    text = html.unescape(text)
 
     elements: list[dict] = []
     pos = 0
@@ -329,18 +331,24 @@ def text_to_blocks(markdown: str) -> list[dict[str, Any]]:
             i += 1
             continue
 
-        # Blockquote: > text → ▎prefix with inline formatting
+        # Blockquote: collect consecutive > lines into a single ▎-prefixed block
         qm = _QUOTE_RE.match(line)
         if qm:
-            content = qm.group(1) or ""
-            elements = [{"text_run": {"content": "▎"}}]
-            if content:
-                elements.extend(_parse_inline(content))
+            quote_lines: list[str] = []
+            while i < len(lines):
+                qm2 = _QUOTE_RE.match(lines[i].rstrip())
+                if not qm2:
+                    break
+                quote_lines.append(qm2.group(1) or "")
+                i += 1
+            merged = "\n".join(quote_lines)
+            elements = [{"text_run": {"content": "▎ "}}]
+            if merged:
+                elements.extend(_parse_inline(merged))
             blocks.append({
                 "block_type": 2,
                 "text": {"elements": elements},
             })
-            i += 1
             continue
 
         # Unordered list: - item or * item (with nested list support)

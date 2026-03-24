@@ -185,14 +185,30 @@ class TestBlockquotes:
         assert blocks[0]["block_type"] == 2
         elements = blocks[0]["text"]["elements"]
         # First element is ▎ prefix, content follows
-        assert elements[0]["text_run"]["content"] == "▎"
+        assert elements[0]["text_run"]["content"] == "▎ "
         all_text = "".join(e["text_run"]["content"] for e in elements)
         assert "引用内容" in all_text
 
     def test_empty_quote(self):
         blocks = text_to_blocks(">")
         elements = blocks[0]["text"]["elements"]
-        assert elements[0]["text_run"]["content"] == "▎"
+        assert elements[0]["text_run"]["content"] == "▎ "
+
+    def test_consecutive_quotes_merged(self):
+        """Consecutive > lines should merge into a single block."""
+        blocks = text_to_blocks("> 第一行\n> 第二行\n> 第三行")
+        assert len(blocks) == 1
+        assert blocks[0]["block_type"] == 2
+        all_text = "".join(e["text_run"]["content"] for e in blocks[0]["text"]["elements"])
+        assert "第一行" in all_text
+        assert "第二行" in all_text
+        assert "第三行" in all_text
+
+    def test_html_entities_decoded(self):
+        """HTML entities should be decoded."""
+        blocks = text_to_blocks("> a &#60; b &#62; c")
+        all_text = "".join(e["text_run"]["content"] for e in blocks[0]["text"]["elements"])
+        assert "a < b > c" in all_text
 
 
 class TestDividers:
@@ -542,7 +558,7 @@ class TestBlockquoteInline:
         blocks = text_to_blocks("> **重点**内容")
         elements = blocks[0]["text"]["elements"]
         # First element is ▎ prefix
-        assert elements[0]["text_run"]["content"] == "▎"
+        assert elements[0]["text_run"]["content"] == "▎ "
         # Should contain bold element
         bold = next(
             (e for e in elements if e["text_run"].get("text_element_style", {}).get("bold")),
@@ -572,4 +588,4 @@ class TestBlockquoteInline:
     def test_empty_quote_unchanged(self):
         blocks = text_to_blocks(">")
         elements = blocks[0]["text"]["elements"]
-        assert elements[0]["text_run"]["content"] == "▎"
+        assert elements[0]["text_run"]["content"] == "▎ "

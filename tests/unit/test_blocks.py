@@ -243,8 +243,8 @@ class TestSanitization:
 
 
 class TestNestedLists:
-    """af's _collect_nested_list returns tree-style items:
-    [{"block": {block_type, bullet/ordered: {elements}}, "children": [{block_type, ...}]}]
+    """_collect_nested_list returns flat items with depth:
+    [{"type": "bullet"|"ordered", "depth": N, "elements": [...]}]
     """
 
     def test_2_level_unordered(self):
@@ -254,36 +254,35 @@ class TestNestedLists:
         assert len(blocks) == 1
         assert "_nested_list" in blocks[0]
         items = blocks[0]["_nested_list"]
-        # af tree: 2 top-level items, first has 1 child
-        assert len(items) == 2
-        assert items[0]["block"]["block_type"] == 12
-        assert len(items[0]["children"]) == 1
-        assert items[0]["children"][0]["block_type"] == 12
-        child_text = items[0]["children"][0]["bullet"]["elements"][0]["text_run"]["content"]
-        assert child_text == "第二层子项"
-        # Second top-level item has no children
-        assert len(items[1].get("children", [])) == 0
+        assert len(items) == 3
+        assert items[0] == {"type": "bullet", "depth": 0, "elements": [{"text_run": {"content": "第一层"}}]}
+        assert items[1]["type"] == "bullet"
+        assert items[1]["depth"] == 1
+        assert items[1]["elements"][0]["text_run"]["content"] == "第二层子项"
+        assert items[2]["depth"] == 0
 
     def test_3_level_unordered(self):
-        """Three-level nesting — af only supports parent+direct children (2 levels)."""
+        """Three-level nesting preserves all depth levels."""
         md = "- L1\n  - L2\n    - L3"
         blocks = text_to_blocks(md)
         assert "_nested_list" in blocks[0]
         items = blocks[0]["_nested_list"]
-        # af structure: L1 is parent, L2 and L3 are both children (flattened)
-        assert items[0]["block"]["block_type"] == 12
-        # All deeper items become children of top-level
-        assert len(items[0]["children"]) >= 1
+        assert len(items) == 3
+        assert items[0]["depth"] == 0
+        assert items[1]["depth"] == 1
+        assert items[2]["depth"] == 2
+        assert items[2]["elements"][0]["text_run"]["content"] == "L3"
 
     def test_2_level_ordered(self):
         md = "1. 步骤一\n  1. 子步骤A\n  2. 子步骤B\n2. 步骤二"
         blocks = text_to_blocks(md)
         assert "_nested_list" in blocks[0]
         items = blocks[0]["_nested_list"]
-        # First parent has 2 children (子步骤A, B)
-        assert items[0]["block"]["block_type"] == 13
-        assert len(items[0]["children"]) == 2
-        assert items[0]["children"][0]["ordered"]["elements"][0]["text_run"]["content"] == "子步骤A"
+        assert len(items) == 4
+        assert items[0] == {"type": "ordered", "depth": 0, "elements": [{"text_run": {"content": "步骤一"}}]}
+        assert items[1]["type"] == "ordered"
+        assert items[1]["depth"] == 1
+        assert items[1]["elements"][0]["text_run"]["content"] == "子步骤A"
 
     def test_flat_list_no_nesting_marker(self):
         """Non-nested list should NOT produce _nested_list marker."""
@@ -296,10 +295,10 @@ class TestNestedLists:
         blocks = text_to_blocks(md)
         assert "_nested_list" in blocks[0]
         items = blocks[0]["_nested_list"]
-        # "功能模块" with 2 children, "非功能需求" alone
-        assert len(items) == 2
-        assert len(items[0]["children"]) == 2
-        assert len(items[1].get("children", [])) == 0
+        assert len(items) == 4
+        assert [i["depth"] for i in items] == [0, 1, 1, 0]
+        assert items[0]["elements"][0]["text_run"]["content"] == "功能模块"
+        assert items[3]["elements"][0]["text_run"]["content"] == "非功能需求"
 
 
 # ── Mixed content ordering ──

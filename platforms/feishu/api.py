@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -84,6 +85,48 @@ def _to_rfc3339(s: str) -> str:
             continue
     # Already RFC3339 or can't parse — return as-is
     return s
+
+
+def _build_descendant_payload(items: list[dict]) -> tuple[list[str], list[dict]]:
+    """Build Feishu descendant API payload from flat list items with depth.
+
+    Uses a stack to reconstruct parent-child relationships from flat depth
+    values, supporting arbitrary nesting depth.
+
+    Returns (children_id, descendants) where:
+    - children_id: top-level temp block IDs
+    - descendants: all block definitions with parent-child relationships
+    """
+    descendants = []
+    top_level_ids = []
+    # Stack: [(depth, temp_id, desc_dict)]
+    stack: list[tuple[int, str, dict]] = []
+
+    for item in items:
+        depth = item["depth"]
+        bt = 12 if item["type"] == "bullet" else 13
+        key = "bullet" if item["type"] == "bullet" else "ordered"
+        tid = f"tmp_{uuid.uuid4().hex[:8]}"
+
+        desc = {
+            "block_id": tid,
+            "block_type": bt,
+            key: {"elements": item["elements"]},
+        }
+
+        # Pop stack to find parent (first item with depth < current)
+        while stack and stack[-1][0] >= depth:
+            stack.pop()
+
+        if stack:
+            stack[-1][2].setdefault("children", []).append(tid)
+        else:
+            top_level_ids.append(tid)
+
+        descendants.append(desc)
+        stack.append((depth, tid, desc))
+
+    return top_level_ids, descendants
 
 
 class FeishuAPI:
@@ -290,11 +333,62 @@ class FeishuAPI:
                                 "block_type": 2,
                                 "text": {"elements": [{"text_run": {"content": line}}]},
                             })
+            elif "_nested_list" in block:
+                await _flush_regular()
+                count = await self._create_nested_list(document_id, block["_nested_list"])
+                if count:
+                    total += count
+                else:
+                    # Degrade: descendant API failed → flat blocks
+                    log.warning("Nested list degraded to flat | doc=%s", document_id)
+                    for item in block["_nested_list"]:
+                        bt = 12 if item["type"] == "bullet" else 13
+                        key = "bullet" if item["type"] == "bullet" else "ordered"
+                        regular_batch.append({
+                            "block_type": bt,
+                            key: {"elements": item["elements"]},
+                        })
             else:
                 regular_batch.append(block)
 
         await _flush_regular()
         return {"ok": True, "blocks_added": total}
+
+    async def _create_nested_list(self, doc_id: str, items: list[dict]) -> int:
+        """Create nested list blocks using the Feishu descendant API.
+
+        Args:
+            items: flat list — [{"type": "bullet"|"ordered", "depth": N, "elements": [...]}]
+                   Supports arbitrary nesting depth via stack-based reconstruction.
+
+        Returns the number of top-level blocks created, 0 on failure.
+        """
+        top_level_ids, descendants = _build_descendant_payload(items)
+
+        if not top_level_ids:
+            return 0
+
+        try:
+            resp = await self._raw_request(
+                "POST",
+                f"/open-apis/docx/v1/documents/{doc_id}/blocks/{doc_id}/descendant",
+                body={
+                    "children_id": top_level_ids,
+                    "index": -1,
+                    "descendants": descendants,
+                },
+                params={"document_revision_id": "-1"},
+            )
+        except Exception as e:
+            log.error("Descendant API failed (HTTP): %s | doc=%s", e, doc_id)
+            return 0
+
+        if resp.get("code") != 0:
+            log.error("Descendant API failed (code %s): %s | doc=%s",
+                      resp.get("code"), resp.get("msg"), doc_id)
+            return 0
+
+        return len(top_level_ids)
 
     async def _create_table_in_doc(self, doc_id: str, rows: list[list[str]]) -> str | None:
         """Create a native table in a Feishu document.
@@ -475,10 +569,21 @@ class FeishuAPI:
 
     async def reply_comment(self, document_id: str, comment_id: str, content: str) -> dict:
         """Reply to a comment on a document."""
+        # Feishu API requires rich text structure, not plain string
+        reply_body = {
+            "content": {
+                "elements": [
+                    {
+                        "type": "text_run",
+                        "text_run": {"content": content},
+                    }
+                ]
+            }
+        }
         data = await self._raw_request(
             "POST",
             f"/open-apis/drive/v1/files/{document_id}/comments/{comment_id}/replies",
-            body={"content": content},
+            body=reply_body,
             params={"file_type": "docx"},
         )
         if data.get("code") != 0:
@@ -1100,6 +1205,64 @@ class FeishuAPI:
                 for fb in freebusy_list
             ]
         }
+
+    # ── Calendar Attendee CRUD ─────────────────────────────────
+
+    async def list_event_attendees(self, event_id: str) -> list[dict]:
+        """List attendees for a calendar event."""
+        calendar_id = await self._get_primary_calendar_id()
+        data = await self._raw_request(
+            "GET",
+            f"/open-apis/calendar/v4/calendars/{calendar_id}/events/{event_id}/attendees",
+            params={"page_size": 50, "user_id_type": "open_id"},
+        )
+        items = data.get("data", {}).get("items", [])
+        return [
+            {
+                "attendee_id": a.get("attendee_id", ""),
+                "user_id": a.get("user_id", ""),
+                "display_name": a.get("display_name", ""),
+                "status": a.get("rsvp_status", "needs_action"),
+                "type": a.get("type", "user"),
+            }
+            for a in items
+        ]
+
+    async def add_event_attendees(self, event_id: str, attendee_ids: list[str]) -> dict:
+        """Add attendees to an existing calendar event.
+
+        Args:
+            event_id: Calendar event ID
+            attendee_ids: List of open_id strings
+        """
+        calendar_id = await self._get_primary_calendar_id()
+        attendees = [{"user_id": uid, "type": "user"} for uid in attendee_ids]
+        data = await self._raw_request(
+            "POST",
+            f"/open-apis/calendar/v4/calendars/{calendar_id}/events/{event_id}/attendees",
+            body={"attendees": attendees},
+            params={"user_id_type": "open_id"},
+        )
+        if data.get("code") != 0:
+            return {"error": f"{data.get('code')}: {data.get('msg')}"}
+        return {"added": len(attendee_ids), "event_id": event_id}
+
+    async def remove_event_attendees(self, event_id: str, attendee_ids: list[str]) -> dict:
+        """Remove attendees from a calendar event.
+
+        Args:
+            event_id: Calendar event ID
+            attendee_ids: List of attendee_id strings (from list_event_attendees)
+        """
+        calendar_id = await self._get_primary_calendar_id()
+        data = await self._raw_request(
+            "POST",
+            f"/open-apis/calendar/v4/calendars/{calendar_id}/events/{event_id}/attendees/batch_delete",
+            body={"attendee_ids": attendee_ids},
+        )
+        if data.get("code") != 0:
+            return {"error": f"{data.get('code')}: {data.get('msg')}"}
+        return {"removed": len(attendee_ids), "event_id": event_id}
 
     async def get_merged_forward_messages(self, message_id: str) -> list[dict]:
         """Get sub-messages from a merged forward message.

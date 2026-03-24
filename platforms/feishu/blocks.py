@@ -210,10 +210,11 @@ def _collect_nested_list(lines: list[str], start: int) -> list[dict] | None:
     """Collect consecutive list lines starting at `start`.
 
     Returns None if all items are level 0 (no nesting detected).
-    Returns a list of {"block": ..., "children": [...]} dicts for the
-    descendant API when nesting is present.
+    Returns a flat list of {"type", "depth", "elements"} dicts — depth is
+    preserved for arbitrary nesting levels.  The descendant API consumer
+    (`_create_nested_list`) rebuilds parent-child relationships via a stack.
     """
-    items: list[tuple[int, int, str]] = []  # (level, block_type, text)
+    raw: list[tuple[int, int, str]] = []  # (level, block_type, text)
     j = start
     while j < len(lines):
         line = lines[j].rstrip()
@@ -222,39 +223,25 @@ def _collect_nested_list(lines: list[str], start: int) -> list[dict] | None:
         parsed = _parse_list_line(line)
         if parsed is None:
             break
-        items.append(parsed)
+        raw.append(parsed)
         j += 1
 
-    if not items:
+    if not raw:
         return None
 
-    # No nesting → keep flat output
-    if not any(level > 0 for level, _, _ in items):
+    # No nesting → caller handles as flat blocks
+    if not any(level > 0 for level, _, _ in raw):
         return None
 
-    # Build nested structure for descendant API
-    result: list[dict] = []
-    idx = 0
-    while idx < len(items):
-        level, btype, text = items[idx]
-        key = "bullet" if btype == 12 else "ordered"
-        block = {
-            "block_type": btype,
-            key: {"elements": _parse_inline(text)},
+    # Flat list with depth — supports unlimited nesting
+    return [
+        {
+            "type": "bullet" if btype == 12 else "ordered",
+            "depth": level,
+            "elements": _parse_inline(text),
         }
-        children: list[dict] = []
-        idx += 1
-        while idx < len(items) and items[idx][0] > level:
-            clevel, cbtype, ctext = items[idx]
-            ckey = "bullet" if cbtype == 12 else "ordered"
-            children.append({
-                "block_type": cbtype,
-                ckey: {"elements": _parse_inline(ctext)},
-            })
-            idx += 1
-        result.append({"block": block, "children": children})
-
-    return result
+        for level, btype, text in raw
+    ]
 
 
 def text_to_blocks(markdown: str) -> list[dict[str, Any]]:
@@ -362,8 +349,7 @@ def text_to_blocks(markdown: str) -> list[dict[str, Any]]:
             nested_items = _collect_nested_list(lines, i)
             if nested_items is not None:
                 blocks.append({"_nested_list": nested_items})
-                count = sum(1 + len(item.get("children", [])) for item in nested_items)
-                i += count
+                i += len(nested_items)
             else:
                 blocks.append({
                     "block_type": 12,
@@ -380,8 +366,7 @@ def text_to_blocks(markdown: str) -> list[dict[str, Any]]:
             nested_items = _collect_nested_list(lines, i)
             if nested_items is not None:
                 blocks.append({"_nested_list": nested_items})
-                count = sum(1 + len(item.get("children", [])) for item in nested_items)
-                i += count
+                i += len(nested_items)
             else:
                 blocks.append({
                     "block_type": 13,

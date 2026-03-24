@@ -23,19 +23,54 @@ log = logging.getLogger("agentic.feishu.api")
 def _to_timestamp(s: str) -> str:
     """Convert time string to Unix timestamp string.
 
-    Accepts: Unix timestamp, ISO 8601, or common datetime formats.
+    Accepts: Unix timestamp, ISO 8601, common datetime formats,
+             relative offsets (+2h, +30m, +1d), 'tomorrow HH:MM', 'HH:MM'.
     Returns seconds since epoch as string.
     """
+    from datetime import timedelta
     s = s.strip()
+    tz_cn = timezone(offset=timedelta(hours=8))
+    now = datetime.now(tz_cn)
+
     # Already a Unix timestamp (seconds)
     if s.isdigit() and len(s) >= 10:
         return s
+
+    # Relative offset: +2h, +30m, +1d
+    if s.startswith("+") and len(s) >= 3:
+        unit = s[-1]
+        try:
+            val = int(s[1:-1])
+        except ValueError:
+            pass
+        else:
+            if unit == "h":
+                return str(int((now + timedelta(hours=val)).timestamp()))
+            elif unit == "m":
+                return str(int((now + timedelta(minutes=val)).timestamp()))
+            elif unit == "d":
+                return str(int((now + timedelta(days=val)).timestamp()))
+
+    # "tomorrow HH:MM" or "tomorrow"
+    if s.lower().startswith("tomorrow"):
+        time_part = s.split(None, 1)[1] if " " in s else "09:00"
+        h, m = map(int, time_part.split(":"))
+        dt = (now + timedelta(days=1)).replace(hour=h, minute=m, second=0, microsecond=0)
+        return str(int(dt.timestamp()))
+
+    # "HH:MM" — today (or next day if past)
+    if len(s) <= 5 and ":" in s and s.replace(":", "").isdigit():
+        h, m = map(int, s.split(":"))
+        dt = now.replace(hour=h, minute=m, second=0, microsecond=0)
+        if dt < now:
+            dt += timedelta(days=1)
+        return str(int(dt.timestamp()))
+
     # Try ISO / common formats
-    from datetime import timedelta
-    tz_cn = timezone(offset=timedelta(hours=8))
     for fmt in (
         "%Y-%m-%dT%H:%M:%S%z",
         "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M",
         "%Y-%m-%d %H:%M:%S",
         "%Y-%m-%d %H:%M",
         "%Y-%m-%d",
@@ -58,17 +93,20 @@ def _to_timestamp(s: str) -> str:
 def _to_rfc3339(s: str) -> str:
     """Convert time string to RFC3339 format (required by freebusy API).
 
+    Supports all formats accepted by _to_timestamp (including +2h, tomorrow, HH:MM).
     Returns: yyyy-mm-ddThh:mm:ss+08:00
     """
-    s = s.strip()
     from datetime import timedelta
     tz_cn = timezone(offset=timedelta(hours=8))
 
-    # Unix timestamp → convert to datetime first
-    if s.isdigit() and len(s) >= 10:
-        dt = datetime.fromtimestamp(int(s), tz=tz_cn)
+    # Route through _to_timestamp for natural formats, then convert to RFC3339
+    ts_str = _to_timestamp(s)
+    if ts_str.isdigit():
+        dt = datetime.fromtimestamp(int(ts_str), tz=tz_cn)
         return dt.strftime("%Y-%m-%dT%H:%M:%S+08:00")
 
+    # Fallback: try direct format parsing (in case _to_timestamp returned as-is)
+    stripped = s.strip()
     for fmt in (
         "%Y-%m-%dT%H:%M:%S%z",
         "%Y-%m-%dT%H:%M:%S",
@@ -77,7 +115,7 @@ def _to_rfc3339(s: str) -> str:
         "%Y-%m-%d",
     ):
         try:
-            dt = datetime.strptime(s, fmt)
+            dt = datetime.strptime(stripped, fmt)
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=tz_cn)
             return dt.strftime("%Y-%m-%dT%H:%M:%S") + dt.strftime("%z")[:3] + ":" + dt.strftime("%z")[3:]

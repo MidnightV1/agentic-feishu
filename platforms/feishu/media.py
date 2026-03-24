@@ -17,7 +17,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Coroutine
 
 log = logging.getLogger("agentic.feishu.media")
 
@@ -32,6 +32,7 @@ _TEXT_EXTS = {
 
 _MAX_INLINE_CHARS = 10_000
 _MAX_IMAGE_DIM = 1024
+_MIN_PDF_TEXT_LEN = 100  # Minimum chars for pypdf to be considered successful
 
 
 class MediaHandler:
@@ -42,8 +43,10 @@ class MediaHandler:
         api: Any,
         data_dir: str = "data",
         compress_script: str = "",
+        pdf_analyzer: Callable[[bytes, str], Coroutine[Any, Any, str]] | None = None,
     ):
         self._api = api
+        self._pdf_analyzer = pdf_analyzer
         self._data_dir = Path(data_dir)
         self._files_dir = self._data_dir / "files"
         self._tmp_dir = self._data_dir / "tmp"
@@ -108,13 +111,9 @@ class MediaHandler:
             if ext in _TEXT_EXTS:
                 return self._read_text_file(stored, file_name)
 
-            # PDF: store path, LLM can use Read tool
+            # PDF: 3-tier fallback chain
             if ext == ".pdf":
-                return (
-                    f"[用户发送了 PDF 文件: {file_name}]\n"
-                    f"文件路径: {stored}\n"
-                    f"请使用 read_file 工具读取此文件内容。"
-                )
+                return await self._process_pdf(stored, file_name, data)
 
             # Other: just store
             return (
@@ -182,6 +181,45 @@ class MediaHandler:
         if len(text) > max_chars:
             text = text[:max_chars] + f"\n\n... [truncated at {max_chars} chars]"
         return text
+
+    async def _process_pdf(self, stored: "Path", file_name: str, raw_data: bytes) -> str:
+        """Process PDF with 3-tier fallback chain.
+
+        Tier 1: pypdf text extraction (fast, free)
+        Tier 2: Gemini API vision analysis (for image-based PDFs)
+        Tier 3: Return path hint for LLM read_file tool
+        """
+        # Tier 1: pypdf
+        text = await self.extract_pdf_text(str(stored))
+        if not text.startswith("[") and len(text.strip()) >= _MIN_PDF_TEXT_LEN:
+            # pypdf succeeded with meaningful content
+            max_chars = 50_000
+            if len(text) > max_chars:
+                text = text[:max_chars] + f"\n\n... [truncated at {max_chars} chars]"
+            return (
+                f"[用户发送了 PDF 文件: {file_name}]\n"
+                f"以下是提取的文本内容:\n\n{text}"
+            )
+
+        # Tier 2: Gemini API analysis (for scanned/image-based PDFs)
+        if self._pdf_analyzer:
+            try:
+                log.info("PDF pypdf insufficient for %s, trying Gemini API", file_name)
+                analysis = await self._pdf_analyzer(raw_data, file_name)
+                if analysis and not analysis.startswith("["):
+                    return (
+                        f"[用户发送了 PDF 文件: {file_name}]\n"
+                        f"以下是 AI 分析的内容:\n\n{analysis}"
+                    )
+            except Exception as e:
+                log.warning("Gemini PDF analysis failed for %s: %s", file_name, e)
+
+        # Tier 3: Fallback to path hint
+        return (
+            f"[用户发送了 PDF 文件: {file_name}]\n"
+            f"文件路径: {stored}\n"
+            f"请使用 read_file 工具读取此文件内容。"
+        )
 
     async def expand_merged_forward(self, message_id: str) -> list[str]:
         """Expand a merged-forward message to get individual sub-messages as text.

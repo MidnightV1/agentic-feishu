@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -49,7 +50,8 @@ SUMMARY_PROMPT = """将以下对话历史压缩为结构化摘要。
 
 ## 要求
 - 保留具体文件路径、命令、配置值、文档 ID
-- 丢弃寒暄和已否决方案的细节
+- 丢弃寒暄、重复、已否决方案的细节（仅记录「排除了 X，因为 Y」）
+- 代码修改只记录改了哪些文件的什么方面，不记录代码本身
 - 优先保留最近的信息
 - 用户纠正的权重最高，必须完整保留
 """
@@ -125,15 +127,28 @@ class ContextManager:
 
     # -- Token tracking & decision ------------------------------------------
 
-    async def count_tokens(self, messages: list[Message]) -> int:
-        """Count tokens for the given messages using the provider."""
-        return await self.provider.count_tokens(messages)
+    async def count_tokens(
+        self, messages: list[Message], tools: list[dict] | None = None,
+    ) -> int:
+        """Count tokens for the given messages using the provider.
+
+        If *tools* is provided, estimate the token overhead of tool/function
+        definitions and add it to the message token count.  Estimation uses
+        len(json.dumps(tools)) // 4 (≈ 1 token per 4 chars) which is a
+        reasonable approximation for both tiktoken and provider-native counts.
+        """
+        msg_tokens = await self.provider.count_tokens(messages)
+        if tools:
+            tools_text = json.dumps(tools, ensure_ascii=False)
+            msg_tokens += len(tools_text) // 4
+        return msg_tokens
 
     async def should_compress(
-        self, messages: list[Message], context_window: int
+        self, messages: list[Message], context_window: int,
+        tools: list[dict] | None = None,
     ) -> bool:
         """Return True if token count exceeds *threshold* fraction of *context_window*."""
-        tokens = await self.count_tokens(messages)
+        tokens = await self.count_tokens(messages, tools=tools)
         limit = int(context_window * self.config.compress_threshold)
         over = tokens > limit
         if over:
@@ -169,8 +184,10 @@ class ContextManager:
             # not enough to split — keep as-is
             return messages
 
-        old = compressible[: -keep_n * 2]
-        recent = compressible[-keep_n * 2 :]
+        split_idx = len(compressible) - keep_n * 2
+        split_idx = _adjust_split_for_tool_groups(compressible, split_idx)
+        old = compressible[:split_idx]
+        recent = compressible[split_idx:]
 
         try:
             summarized = await self._summarize(old)
@@ -269,10 +286,19 @@ def _section_header(component_type: str) -> str:
         "tool_guidelines": "# Tool Guidelines",
         "skill_descriptions": "# Available Skills",
         "environment": "# Environment",
-        "user_profile": "# User",
-        "memory": "# Memory",
-        "persona": "# Persona",
         "session_context": "# Session Context",
+        # --- context_assembler types ---
+        "org_soul": "# 组织灵魂",
+        "org_cognition": "# 组织认知",
+        "bot_soul": "# Bot 灵魂",
+        "bot_rules": "# 行为规则",
+        "persona": "# 角色设定",
+        "tools": "# 可用工具",
+        "shared_knowledge": "# 共享知识",
+        "corrections": "# 用户纠正",
+        "user_profile": "# 用户画像",
+        "user_memory": "# 用户记忆",
+        "platform": "# 平台协议",
         "recovery": "",  # RECOVERY_PREAMBLE already has its own header
     }
     return headers.get(component_type, f"# {component_type}")
@@ -293,6 +319,30 @@ def _split_pinned(
     return pinned, rest
 
 
+
+def _adjust_split_for_tool_groups(messages: list[Message], cut: int) -> int:
+    """Adjust a split index so tool-call atomic groups are not broken.
+
+    An assistant message with tool_calls and its subsequent tool-result
+    messages form an atomic group.  If *cut* falls inside such a group
+    (after the assistant but before the last tool result), move *cut*
+    back to before the assistant so the whole group stays on the recent
+    side.
+    """
+    if cut <= 0 or cut >= len(messages):
+        return cut
+    # Walk backwards from cut to see if we are inside an atomic group
+    for i in range(cut - 1, -1, -1):
+        m = messages[i]
+        if m.role == "tool":
+            continue  # still inside tool results
+        if m.role == "assistant" and getattr(m, "tool_calls", None):
+            # cut is between this assistant(tool_calls) and its results
+            return i
+        break  # hit a non-tool, non-assistant-with-calls -- no adjustment
+    return cut
+
+
 def _keep_recent(messages: list[Message], rounds: int) -> list[Message]:
     """Keep the last *rounds* user-assistant pairs (+ any trailing)."""
     if rounds <= 0 or not messages:
@@ -306,6 +356,7 @@ def _keep_recent(messages: list[Message], rounds: int) -> list[Message]:
             if count >= rounds:
                 cut = i
                 break
+    cut = _adjust_split_for_tool_groups(messages, cut)
     return messages[cut:]
 
 
@@ -326,6 +377,11 @@ async def build_recovery_context(
     (restart, crash, timeout).  Returns a ``ContextComponent`` of type
     ``"recovery"`` suitable for ``ContextManager.build_system_prompt``,
     or ``None`` if there is no prior history to recover.
+
+    Enhanced formatting:
+    - assistant(tool_calls) messages show which tools were called
+    - tool result messages show tool name + truncated output (first 500 chars)
+    - plain user/assistant/system messages show content as before
     """
     messages = await session_store.get_recent_messages(
         session_key, limit=limit, truncate=truncate,
@@ -333,12 +389,31 @@ async def build_recovery_context(
     if not messages:
         return None
 
-    # Format as readable transcript
+    # Format as readable transcript with tool call awareness
     lines: list[str] = [RECOVERY_PREAMBLE, ""]
-    role_label = {"user": "用户", "assistant": "助手", "system": "系统"}
+    role_label = {"user": "用户", "assistant": "助手", "system": "系统", "tool": "工具"}
     for m in messages:
-        label = role_label.get(m["role"], m["role"])
-        lines.append(f"**{label}**: {m['content']}")
+        role = m["role"]
+        label = role_label.get(role, role)
+        tool_calls = m.get("tool_calls")
+        tool_name = m.get("name")
+
+        if role == "assistant" and tool_calls:
+            # Assistant message with tool invocations — extract tool names
+            names = [tc.get("function", {}).get("name", "?") for tc in tool_calls]
+            text_part = m.get("content", "") or ""
+            if text_part.strip():
+                lines.append(f"**助手**: {text_part.strip()}")
+            lines.append(f"**助手**: [调用了 {', '.join(names)}]")
+        elif role == "tool":
+            # Tool result — show name and truncated content for key conclusions
+            content = m.get("content", "") or ""
+            display_name = tool_name or "unknown"
+            truncated = content[:500] + ("..." if len(content) > 500 else "")
+            lines.append(f"**工具 {display_name}**: {truncated}")
+        else:
+            content = m.get("content", "") or ""
+            lines.append(f"**{label}**: {content}")
     transcript = "\n\n".join(lines)
 
     logger.info(

@@ -1,0 +1,7 @@
+name: arxiv-tracker
+display_name: ArXiv Tracker
+description: ArXiv 论文搜索、追踪与摘要
+triggers:
+  - "arxiv|论文|paper|学术|research"
+enabled: true
+priority: 3

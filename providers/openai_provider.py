@@ -232,10 +232,15 @@ class OpenAIProvider(BaseProvider):
         result = []
         for i, msg in enumerate(messages):
             if msg.role == "tool":
+                # OpenAI only supports string content for tool results
+                if isinstance(msg.content, list):
+                    tool_content = json.dumps(msg.content, ensure_ascii=False)
+                else:
+                    tool_content = msg.content if isinstance(msg.content, str) else msg.text
                 result.append({
                     "role": "tool",
                     "tool_call_id": msg.tool_call_id,
-                    "content": msg.content if isinstance(msg.content, str) else msg.text,
+                    "content": tool_content,
                 })
             elif msg.role == "assistant" and msg.tool_calls:
                 m: dict[str, Any] = {

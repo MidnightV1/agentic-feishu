@@ -404,6 +404,10 @@ class ToolRegistry:
             logger.exception("Tool '%s' raised %s", name, type(exc).__name__)
             return ToolResult(call_id, f"Error: {type(exc).__name__}: {exc}", is_error=True)
 
+        # Multimodal result: handler returned a content block (image, file, etc.)
+        if isinstance(result, dict) and result.get("type") in ("image", "file"):
+            return ToolResult(call_id, [result])
+
         # Serialize result
         if isinstance(result, (dict, list)):
             content = json.dumps(result, ensure_ascii=False, default=str)

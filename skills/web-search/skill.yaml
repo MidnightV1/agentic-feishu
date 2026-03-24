@@ -1,0 +1,7 @@
+name: web-search
+display_name: Web Search
+description: 网页搜索和新闻搜索（基于 Gemini grounding search）
+triggers:
+  - "搜索|search|查一下|搜一下|找一下|查找"
+enabled: true
+priority: 3

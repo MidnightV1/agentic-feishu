@@ -10,6 +10,10 @@ from .types import Callbacks, Message, RunConfig, RunResult, ToolCall, ToolResul
 
 log = logging.getLogger(__name__)
 
+# P1-4: Retry config for transient errors
+MAX_RETRIES = 3
+RETRY_DELAYS = [2, 4, 8]  # seconds
+
 
 class AgentLoop:
     """Drives a multi-turn conversation with tool use.
@@ -60,6 +64,10 @@ class AgentLoop:
             # Refresh tool schemas each turn (deferred tools may have expanded)
             tool_schemas = self._tools.get_tool_schemas()
 
+            # P1-8: Disable tools for models that don't support them
+            if not self._model_supports_tools(config.provider, config.model):
+                tool_schemas = []
+
             # --- Call provider ---
             if cb.on_turn_start:
                 await cb.on_turn_start(turn)
@@ -68,7 +76,7 @@ class AgentLoop:
             )
             msgs.append(assistant_msg)
             total_usage += turn_usage
-            total_cost = self._estimate_cost(total_usage, config.model)
+            total_cost = self._estimate_cost(total_usage, config.provider, config.model)
 
             # --- Budget guard ---
             if total_cost >= config.max_budget_usd:
@@ -83,12 +91,12 @@ class AgentLoop:
                 return self._build_result(msgs, total_usage, total_cost, turn, "end_turn")
 
             results = await self._execute_tools(assistant_msg.tool_calls, cb)
-            for result in results:
+            for tc, result in zip(assistant_msg.tool_calls, results):
                 msgs.append(Message(
                     role="tool",
                     content=result.content,
                     tool_call_id=result.tool_call_id,
-                    name=result.tool_call_id,  # some providers want name
+                    name=tc.name,  # tool function name, not call ID
                 ))
 
             if cb.on_turn_end:
@@ -106,13 +114,53 @@ class AgentLoop:
         cb: Callbacks,
         provider: Any = None,
     ) -> tuple[Message, Usage]:
-        """Call the LLM provider, handling both streaming and non-streaming."""
+        """Call the LLM provider with transient error retry (P1-4)."""
         kwargs: dict[str, Any] = {}
         if config.temperature is not None:
             kwargs["temperature"] = config.temperature
         if config.model:
             kwargs["model"] = config.model
 
+        last_error: Exception | None = None
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                result = await self._do_provider_call(
+                    messages, tool_schemas, config, cb, **kwargs,
+                )
+                # Check for empty result (transient provider hiccup)
+                msg, usage = result
+                if msg.content == "" and not msg.tool_calls:
+                    if attempt < MAX_RETRIES:
+                        delay = RETRY_DELAYS[attempt]
+                        log.warning(
+                            "Empty result, retry %d/%d in %ds",
+                            attempt + 1, MAX_RETRIES, delay,
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                return result
+            except Exception as e:
+                if self._is_transient(e) and attempt < MAX_RETRIES:
+                    delay = RETRY_DELAYS[attempt]
+                    log.warning(
+                        "Transient error %s, retry %d/%d in %ds",
+                        e, attempt + 1, MAX_RETRIES, delay,
+                    )
+                    await asyncio.sleep(delay)
+                    last_error = e
+                    continue
+                raise
+        raise last_error or RuntimeError("Max retries exceeded")
+
+    async def _do_provider_call(
+        self,
+        messages: list[Message],
+        tool_schemas: list[dict],
+        config: RunConfig,
+        cb: Callbacks,
+        **kwargs: Any,
+    ) -> tuple[Message, Usage]:
+        """Execute one provider call (streaming or non-streaming)."""
         if config.stream:
             return await self._call_streaming(messages, tool_schemas, cb, **kwargs)
         else:
@@ -124,6 +172,21 @@ class AgentLoop:
                 return await self._consume_stream(result, cb)
             usage = getattr(self._provider, "_last_usage", Usage())
             return result, usage
+
+    @staticmethod
+    def _is_transient(e: Exception) -> bool:
+        """Errors worth retrying."""
+        error_str = str(e).lower()
+        # Network/timeout errors
+        if any(k in type(e).__name__.lower() for k in ("timeout", "connection", "network")):
+            return True
+        # HTTP 5xx or 429
+        if hasattr(e, "status_code"):
+            return e.status_code >= 500 or e.status_code == 429
+        # Known transient patterns
+        if any(k in error_str for k in ("timeout", "connection reset", "server error", "overloaded")):
+            return True
+        return False
 
     async def _consume_stream(self, stream, cb: Callbacks) -> tuple[Message, Usage]:
         """Consume a stream iterator returned by provider (internal upgrade to streaming)."""
@@ -215,9 +278,29 @@ class AgentLoop:
         return result
 
     @staticmethod
-    def _estimate_cost(usage: Usage, model: str) -> float:
-        """Rough cost estimate. Override or extend for accurate per-model pricing."""
-        # Default: $3/M input, $15/M output (Claude 3.5 Sonnet ballpark)
+    def _model_supports_tools(provider: str, model: str) -> bool:
+        """P1-8: Check if the model supports tool calling via presets."""
+        try:
+            from providers.presets import get_model_info
+            info = get_model_info(provider, model)
+            return info.tool_support if info else True
+        except Exception:
+            return True  # default: assume supported
+
+    @staticmethod
+    def _estimate_cost(usage: Usage, provider: str = "", model: str = "") -> float:
+        """CTX-3: Per-model pricing from presets, fallback to Sonnet ballpark."""
+        try:
+            from providers.presets import get_model_info
+            info = get_model_info(provider, model)
+            if info and hasattr(info, "input_cost_per_m") and info.input_cost_per_m:
+                return (
+                    usage.input_tokens * info.input_cost_per_m / 1_000_000
+                    + usage.output_tokens * info.output_cost_per_m / 1_000_000
+                )
+        except Exception:
+            pass
+        # Fallback: Sonnet 4 ballpark ($3/M input, $15/M output)
         input_cost = (usage.input_tokens - usage.cached_tokens) * 3.0 / 1_000_000
         cached_cost = usage.cached_tokens * 0.3 / 1_000_000
         output_cost = usage.output_tokens * 15.0 / 1_000_000

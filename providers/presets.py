@@ -26,6 +26,10 @@ class ModelInfo:
       - vision=False → image inputs converted to text description
       - file_input=False → files processed via extraction, not native upload
       - audio_input=False → audio transcribed to text before sending
+
+    Pricing (CTX-3):
+      - input_cost_per_m: $ per million input tokens (0 = unknown)
+      - output_cost_per_m: $ per million output tokens (0 = unknown)
     """
     context_window: int = 128_000
     tool_support: bool = True
@@ -33,6 +37,8 @@ class ModelInfo:
     file_input: bool = False   # native file/document upload
     audio_input: bool = False  # native audio understanding
     reasoning: bool = False    # thinking/CoT model
+    input_cost_per_m: float = 0.0   # $ per million input tokens
+    output_cost_per_m: float = 0.0  # $ per million output tokens
     note: str = ""
 
 
@@ -61,11 +67,11 @@ PRESETS: dict[str, ProviderPreset] = {
         default_model="gpt-4.1",
         sdk="openai",
         models={
-            "gpt-4.1": ModelInfo(context_window=1_000_000, vision=True, file_input=True),
-            "gpt-4.1-mini": ModelInfo(context_window=1_000_000, vision=True, file_input=True),
-            "gpt-4.1-nano": ModelInfo(context_window=1_000_000, vision=True),
-            "o3": ModelInfo(context_window=200_000, vision=True, reasoning=True),
-            "o4-mini": ModelInfo(context_window=200_000, vision=True, reasoning=True),
+            "gpt-4.1": ModelInfo(context_window=1_000_000, vision=True, file_input=True, input_cost_per_m=2.0, output_cost_per_m=8.0),
+            "gpt-4.1-mini": ModelInfo(context_window=1_000_000, vision=True, file_input=True, input_cost_per_m=0.4, output_cost_per_m=1.6),
+            "gpt-4.1-nano": ModelInfo(context_window=1_000_000, vision=True, input_cost_per_m=0.1, output_cost_per_m=0.4),
+            "o3": ModelInfo(context_window=200_000, vision=True, reasoning=True, input_cost_per_m=2.0, output_cost_per_m=8.0),
+            "o4-mini": ModelInfo(context_window=200_000, vision=True, reasoning=True, input_cost_per_m=1.1, output_cost_per_m=4.4),
         },
     ),
 
@@ -76,9 +82,9 @@ PRESETS: dict[str, ProviderPreset] = {
         default_model="claude-sonnet-4-6",
         sdk="anthropic",
         models={
-            "claude-opus-4-6": ModelInfo(context_window=200_000, vision=True, file_input=True),
-            "claude-sonnet-4-6": ModelInfo(context_window=200_000, vision=True, file_input=True),
-            "claude-haiku-4-5-20251001": ModelInfo(context_window=200_000, vision=True),
+            "claude-opus-4-6": ModelInfo(context_window=200_000, vision=True, file_input=True, input_cost_per_m=15.0, output_cost_per_m=75.0),
+            "claude-sonnet-4-6": ModelInfo(context_window=200_000, vision=True, file_input=True, input_cost_per_m=3.0, output_cost_per_m=15.0),
+            "claude-haiku-4-5-20251001": ModelInfo(context_window=200_000, vision=True, input_cost_per_m=0.8, output_cost_per_m=4.0),
         },
     ),
 
@@ -89,8 +95,8 @@ PRESETS: dict[str, ProviderPreset] = {
         default_model="gemini-2.5-flash",
         sdk="gemini",
         models={
-            "gemini-2.5-pro": ModelInfo(context_window=1_000_000, vision=True, file_input=True, audio_input=True),
-            "gemini-2.5-flash": ModelInfo(context_window=1_000_000, vision=True, file_input=True, audio_input=True),
+            "gemini-2.5-pro": ModelInfo(context_window=1_000_000, vision=True, file_input=True, audio_input=True, input_cost_per_m=1.25, output_cost_per_m=10.0),
+            "gemini-2.5-flash": ModelInfo(context_window=1_000_000, vision=True, file_input=True, audio_input=True, input_cost_per_m=0.15, output_cost_per_m=0.6),
         },
     ),
 
@@ -103,20 +109,20 @@ PRESETS: dict[str, ProviderPreset] = {
         default_model="anthropic/claude-sonnet-4",
         models={
             # Anthropic
-            "anthropic/claude-opus-4": ModelInfo(context_window=200_000),
-            "anthropic/claude-sonnet-4": ModelInfo(context_window=200_000),
-            "anthropic/claude-haiku-4": ModelInfo(context_window=200_000),
+            "anthropic/claude-opus-4": ModelInfo(context_window=200_000, input_cost_per_m=15.0, output_cost_per_m=75.0),
+            "anthropic/claude-sonnet-4": ModelInfo(context_window=200_000, input_cost_per_m=3.0, output_cost_per_m=15.0),
+            "anthropic/claude-haiku-4": ModelInfo(context_window=200_000, input_cost_per_m=0.8, output_cost_per_m=4.0),
             # OpenAI
-            "openai/gpt-4.1": ModelInfo(context_window=1_000_000),
-            "openai/gpt-4.1-mini": ModelInfo(context_window=1_000_000),
-            "openai/o3": ModelInfo(context_window=200_000, reasoning=True),
-            "openai/o4-mini": ModelInfo(context_window=200_000, reasoning=True),
+            "openai/gpt-4.1": ModelInfo(context_window=1_000_000, input_cost_per_m=2.0, output_cost_per_m=8.0),
+            "openai/gpt-4.1-mini": ModelInfo(context_window=1_000_000, input_cost_per_m=0.4, output_cost_per_m=1.6),
+            "openai/o3": ModelInfo(context_window=200_000, reasoning=True, input_cost_per_m=2.0, output_cost_per_m=8.0),
+            "openai/o4-mini": ModelInfo(context_window=200_000, reasoning=True, input_cost_per_m=1.1, output_cost_per_m=4.4),
             # Google
-            "google/gemini-2.5-pro": ModelInfo(context_window=1_000_000),
-            "google/gemini-2.5-flash": ModelInfo(context_window=1_000_000),
+            "google/gemini-2.5-pro": ModelInfo(context_window=1_000_000, input_cost_per_m=1.25, output_cost_per_m=10.0),
+            "google/gemini-2.5-flash": ModelInfo(context_window=1_000_000, input_cost_per_m=0.15, output_cost_per_m=0.6),
             # DeepSeek
-            "deepseek/deepseek-chat-v3-0324": ModelInfo(context_window=128_000),
-            "deepseek/deepseek-r1": ModelInfo(context_window=128_000, reasoning=True),
+            "deepseek/deepseek-chat-v3-0324": ModelInfo(context_window=128_000, input_cost_per_m=0.27, output_cost_per_m=1.1),
+            "deepseek/deepseek-r1": ModelInfo(context_window=128_000, reasoning=True, input_cost_per_m=0.55, output_cost_per_m=2.19),
             # Meta
             "meta-llama/llama-4-maverick": ModelInfo(context_window=1_000_000),
             "meta-llama/llama-4-scout": ModelInfo(context_window=512_000),
@@ -137,11 +143,15 @@ PRESETS: dict[str, ProviderPreset] = {
         models={
             "deepseek-chat": ModelInfo(
                 context_window=128_000,
+                input_cost_per_m=0.27,
+                output_cost_per_m=1.1,
                 note="DeepSeek-V3 latest, non-thinking mode",
             ),
             "deepseek-reasoner": ModelInfo(
                 context_window=128_000,
                 reasoning=True,
+                input_cost_per_m=0.55,
+                output_cost_per_m=2.19,
                 note="DeepSeek-V3 thinking/CoT mode",
             ),
         },

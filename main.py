@@ -19,11 +19,12 @@ from core.types import RunConfig
 from infra.jsonl_store import JSONLStore
 from infra.bot_context import BotContext
 from infra.memory import MemoryStore
+from infra.goal_tree import GoalTree
 from infra.org_context import OrgContext
 from infra.session import SessionStore
 from infra.user_bot_relation import UserBotRelation
 from infra.user_profile import UserProfileStore
-from jobs.explorer import ExploreQueue
+from jobs.explorer import ExploreQueue, ExplorerEngine
 from jobs.heartbeat import HeartbeatMonitor
 from jobs.scheduler import JobConfig, Scheduler
 from platforms.feishu.adapter import FeishuAdapter
@@ -174,10 +175,43 @@ async def main() -> None:
     def _provider_factory(name: str):
         return create_provider(settings, name)
 
+    # ── Explorer engine ──────────────────────────────────────────
+    goal_tree = GoalTree(os.path.join(settings.data_dir, "goal_tree.yaml"))
+    memory_store = MemoryStore(os.path.join(settings.data_dir, "memory"))
+
+    # Notify target: first bot's dispatcher.send_to_user (wired after bots start)
+    _explorer_notify_fn = None  # set after first bot dispatcher is ready
+    _owner_open_id = os.environ.get("FEISHU_OWNER_OPEN_ID", "")
+
+    explorer_engine = ExplorerEngine(
+        queue=explore_queue,
+        goal_tree=goal_tree,
+        memory_store=memory_store,
+        provider_factory=_provider_factory,
+        notify_open_id=_owner_open_id,
+    )
+
     # ── Heartbeat + Scheduler ─────────────────────────────────────
+    # Create lightweight providers for heartbeat triage/action layers.
+    # Uses deepseek-chat (non-reasoning) — cheapest available model.
+    from providers.openai_provider import OpenAIProvider
+    _ds_cfg = settings.deepseek
+    _heartbeat_provider = None
+    if _ds_cfg.api_key:
+        _heartbeat_provider = OpenAIProvider(
+            api_key=_ds_cfg.api_key,
+            model='deepseek-chat',
+            base_url=_ds_cfg.base_url or 'https://api.deepseek.com',
+            name_override='deepseek',
+        )
+
     heartbeat = HeartbeatMonitor(
         usage_tracker=usage_tracker,
         daily_budget_usd=settings.max_budget_usd * 10,
+        triage_provider=_heartbeat_provider,
+        action_provider=_heartbeat_provider,
+        workspace_dir=str(Path(__file__).parent / settings.workspace_dir),
+        explorer=explorer_engine,
     )
     scheduler = Scheduler()
     scheduler.add_job(JobConfig(
@@ -234,7 +268,44 @@ async def main() -> None:
         # Per-bot media handler
         bot_feishu_api = FeishuAPI(app_id=bot_cfg.app_id, app_secret=bot_cfg.app_secret)
         await bot_feishu_api.start()
-        bot_media = MediaHandler(api=bot_feishu_api, data_dir=settings.data_dir)
+        # Build PDF analyzer callback using Gemini API (for scanned/image-based PDFs)
+        _pdf_analyzer = None
+        if settings.gemini.api_key:
+            from google import genai as _genai
+            from google.genai import types as _gtypes
+            _gclient = _genai.Client(api_key=settings.gemini.api_key)
+
+            async def _analyze_pdf_with_gemini(pdf_bytes: bytes, file_name: str) -> str:
+                """Use Gemini Flash to analyze image-based PDF content."""
+                resp = await _gclient.aio.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=[
+                        _gtypes.Content(role="user", parts=[
+                            _gtypes.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
+                            _gtypes.Part.from_text(
+                                text=f"请详细提取并总结这份 PDF ({file_name}) 的所有文本内容。"
+                                " 如果包含表格，保持表格结构。如果是扫描件，进行 OCR 识别。"
+                            ),
+                        ]),
+                    ],
+                    config=_gtypes.GenerateContentConfig(
+                        temperature=0.1,
+                        max_output_tokens=8192,
+                    ),
+                )
+                if resp.candidates and resp.candidates[0].content.parts:
+                    return "\n".join(
+                        p.text for p in resp.candidates[0].content.parts if p.text
+                    )
+                return "[Gemini PDF analysis returned empty]"
+
+            _pdf_analyzer = _analyze_pdf_with_gemini
+
+        bot_media = MediaHandler(
+            api=bot_feishu_api,
+            data_dir=settings.data_dir,
+            pdf_analyzer=_pdf_analyzer,
+        )
 
         # Context assembler (pulls from all layers)
         assembler = ContextAssembler(
@@ -269,6 +340,11 @@ async def main() -> None:
         adapter.set_media_handler(bot_media, bot_feishu_api)
         await adapter.start()
         adapters.append(adapter)
+
+        # Wire explorer notification to first bot's dispatcher
+        if not explorer_engine._notify and bot_dispatcher:
+            explorer_engine._notify = bot_dispatcher.send_to_user
+            log.info("Explorer notification wired to bot '%s'", bot_name)
 
     log.info("All %d bot(s) started", len(adapters))
 

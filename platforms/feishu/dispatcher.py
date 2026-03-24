@@ -216,6 +216,8 @@ class FeishuDispatcher:
 
         first_msg_id = None
         for i, chunk in enumerate(chunks):
+            if i > 0:
+                await asyncio.sleep(0.5)
             card = _build_card(chunk, header if i == 0 else None, color)
             msg_id = await self._send_card_raw(
                 chat_id, card, reply_message_id if i == 0 else ""
@@ -369,6 +371,8 @@ class FeishuDispatcher:
 
         first_msg_id = None
         for i, chunk in enumerate(chunks):
+            if i > 0:
+                await asyncio.sleep(0.5)
             card = _build_card(chunk, header if i == 0 else None, color)
             msg_id = await self._send_card_raw(
                 open_id, card, receive_id_type="open_id",

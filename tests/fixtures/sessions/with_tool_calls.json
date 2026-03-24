@@ -1,0 +1,24 @@
+[
+  {"role": "user", "content": "帮我看看 main.py 的内容"},
+  {"role": "assistant", "content": "", "tool_calls": [
+    {"id": "tc_1", "name": "read_file", "arguments": {"path": "main.py"}}
+  ]},
+  {"role": "tool", "content": "import sys\n\ndef main():\n    print('hello world')\n\nif __name__ == '__main__':\n    main()", "tool_call_id": "tc_1", "name": "read_file"},
+  {"role": "assistant", "content": "main.py 是一个简单的入口文件，定义了 main() 函数打印 hello world。"},
+  {"role": "user", "content": "运行一下看看"},
+  {"role": "assistant", "content": "", "tool_calls": [
+    {"id": "tc_2", "name": "bash", "arguments": {"command": "python3 main.py"}}
+  ]},
+  {"role": "tool", "content": "hello world", "tool_call_id": "tc_2", "name": "bash"},
+  {"role": "assistant", "content": "运行成功，输出了 hello world。"},
+  {"role": "user", "content": "把输出改成中文"},
+  {"role": "assistant", "content": "", "tool_calls": [
+    {"id": "tc_3", "name": "edit_file", "arguments": {"path": "main.py", "old": "hello world", "new": "你好世界"}}
+  ]},
+  {"role": "tool", "content": "File edited successfully.", "tool_call_id": "tc_3", "name": "edit_file"},
+  {"role": "assistant", "content": "", "tool_calls": [
+    {"id": "tc_4", "name": "bash", "arguments": {"command": "python3 main.py"}}
+  ]},
+  {"role": "tool", "content": "你好世界", "tool_call_id": "tc_4", "name": "bash"},
+  {"role": "assistant", "content": "已修改并验证，现在输出「你好世界」。"}
+]

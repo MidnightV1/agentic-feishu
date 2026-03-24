@@ -45,6 +45,7 @@ class JobConfig:
     next_run_at: float = 0
     consecutive_errors: int = 0
     last_error: str = ""
+    silent_token: str = ""              # if output contains this token and remaining text <= 300 chars, skip notify
     metadata: dict = field(default_factory=dict)
 
 
@@ -90,10 +91,11 @@ class Scheduler:
         await scheduler.start()
     """
 
-    def __init__(self) -> None:
+    def __init__(self, notify_fn: Callable[..., Coroutine] | None = None) -> None:
         self._jobs: dict[str, JobConfig] = {}
         self._task: asyncio.Task | None = None
         self._running = False
+        self._notify_fn = notify_fn  # async fn(text) to send notifications
 
     def add_job(self, job: JobConfig) -> None:
         now = time.time()
@@ -187,7 +189,7 @@ class Scheduler:
         """Execute a single job with error tracking and backoff."""
         job.last_run = time.time()
         try:
-            await job.handler()
+            result = await job.handler()
             job.consecutive_errors = 0
             job.last_error = ""
             log.info("Job '%s' completed", job.name)
@@ -196,6 +198,18 @@ class Scheduler:
             if job.one_shot:
                 job.enabled = False
                 log.info("One-shot job '%s' disabled after completion", job.name)
+
+            # Silent token check: suppress notification if output is trivial
+            output = str(result) if result is not None else ""
+            if output and self._notify_fn:
+                if job.silent_token and job.silent_token in output:
+                    remaining = output.replace(job.silent_token, "").strip()
+                    if len(remaining) <= 300:
+                        log.info("Job '%s' output silenced (silent_token match, remaining=%d chars)", job.name, len(remaining))
+                    else:
+                        await self._notify_fn(output)
+                else:
+                    await self._notify_fn(output)
 
         except Exception as e:
             job.consecutive_errors += 1

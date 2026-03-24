@@ -33,7 +33,8 @@ from platforms.feishu.tags import wrap_user_input, inject_notifications, parse_o
 
 log = logging.getLogger("agentic.feishu.adapter")
 
-DEBOUNCE_SECONDS = 0.5
+DEBOUNCE_FIRST = 2.0   # first message wait (catch doc-share + comment splits)
+DEBOUNCE_NEXT = 1.0    # subsequent message wait
 DEDUP_TTL = 3600  # 1h
 DEDUP_MAX_SIZE = 1000
 
@@ -252,6 +253,12 @@ class FeishuAdapter:
         self._provider_factory = provider_factory
         self._scheduler = scheduler
         self._provider_cache: dict[str, Any] = {}  # provider_name → provider instance
+        self._bot_open_id: str = ""  # populated at start() via bot.info API
+        self._tenant_key: str | None = None  # P2-3: tenant isolation (auto-learned)
+
+        # P0-1: session serialization — one lock per debounce_key
+        self._session_locks: dict[str, asyncio.Lock] = {}
+        self._running_tasks: dict[str, asyncio.Task] = {}  # P1-1 recall cancellation
 
     def set_media_handler(self, media: MediaHandler, api: Any = None) -> None:
         """Set the media handler for processing images/files/audio."""
@@ -291,6 +298,18 @@ class FeishuAdapter:
 
         self._running = True
         self._loop_ref = asyncio.get_running_loop()
+
+        # Fetch bot open_id for group @mention filtering
+        try:
+            if self._feishu_api:
+                resp = await self._feishu_api.request("GET", "/open-apis/bot/v3/info")
+                self._bot_open_id = (resp.get("bot") or {}).get("open_id", "")
+                if self._bot_open_id:
+                    log.info("Bot open_id: %s", self._bot_open_id)
+                else:
+                    log.warning("Could not fetch bot open_id — group @mention filter disabled")
+        except Exception:
+            log.warning("Failed to fetch bot info, group @mention filter disabled", exc_info=True)
 
         # Patch 1: cap ping_interval (server sends 120s, too long → idle disconnect)
         _client = self._ws_client
@@ -396,12 +415,31 @@ class FeishuAdapter:
             chat_type = msg.chat_type
             sender_id = sender.sender_id.open_id if sender.sender_id else ""
 
+            # Group messages: only process if bot is @mentioned
+            if chat_type == "group" and self._bot_open_id:
+                mentions = getattr(msg, "mentions", None) or []
+                bot_mentioned = any(
+                    getattr(getattr(m, "id", None), "open_id", None) == self._bot_open_id
+                    for m in mentions
+                )
+                if not bot_mentioned:
+                    return  # group message without @bot, silently discard
+
             # Dedup
             now = time.time()
             if message_id in self._seen_ids:
                 return
             self._seen_ids[message_id] = now
             self._clean_dedup(now)
+
+            # Tenant isolation (P2-3)
+            tenant_key = getattr(data.event, 'tenant_key', None) or ''
+            if self._tenant_key is None and tenant_key:
+                self._tenant_key = tenant_key
+                log.info("Learned tenant_key: %s", tenant_key[:8])
+            elif self._tenant_key and tenant_key and tenant_key != self._tenant_key:
+                log.debug("Cross-tenant message discarded: %s", msg_id)
+                return
 
             # Auto-learn sender identity (async, fire-and-forget)
             if sender_id:
@@ -431,6 +469,14 @@ class FeishuAdapter:
                 return
             self._content_hashes[c_hash] = now
 
+            # Stale message discard (WebSocket reconnect backlog protection)
+            create_time_ms = int(getattr(msg, "create_time", None) or "0")
+            if create_time_ms > 0:
+                age_seconds = (time.time() * 1000 - create_time_ms) / 1000
+                if age_seconds > 120:
+                    log.debug("Discarding stale message %s (%.0fs old)", message_id, age_seconds)
+                    return
+
             # Rate limit check (per sender)
             if self._check_rate_limit(sender_id):
                 log.info("Rate limited sender %s", sender_id)
@@ -458,6 +504,17 @@ class FeishuAdapter:
                     lambda: asyncio.ensure_future(
                         self._handle_media(
                             msg_type, content, message_id,
+                            key, chat_id, chat_type, sender_id,
+                        )
+                    )
+                )
+            elif msg_type == "merge_forward" and self._media:
+                key = f"{chat_id}:{sender_id}"
+                loop = asyncio.get_event_loop()
+                loop.call_soon_threadsafe(
+                    lambda: asyncio.ensure_future(
+                        self._handle_merge_forward(
+                            content, message_id,
                             key, chat_id, chat_type, sender_id,
                         )
                     )
@@ -498,21 +555,23 @@ class FeishuAdapter:
 
     async def _debounce_flush(self, key: str) -> None:
         """Wait for debounce window, then process the batch."""
-        await asyncio.sleep(DEBOUNCE_SECONDS)
-        batch = self._pending.pop(key, None)
+        batch = self._pending.get(key)
+        delay = DEBOUNCE_FIRST if (not batch or len(batch.parts) <= 1) else DEBOUNCE_NEXT
+        await asyncio.sleep(delay)
+        batch = self._pending.get(key)
         if not batch:
             return
 
+        # Wait for in-flight media downloads before flushing
+        if batch.pending_media > 0:
+            log.debug("Deferring flush for %s: %d media pending", key, batch.pending_media)
+            batch.timer = asyncio.create_task(self._debounce_flush(key))
+            return
+
+        self._pending.pop(key, None)
         combined_text = "\n".join(batch.parts)
         asyncio.create_task(
-            self._process_message(
-                combined_text,
-                batch.chat_id,
-                batch.chat_type,
-                batch.sender_id,
-                batch.sender_name,
-                batch.first_message_id,
-            )
+            self._serialized_process(key, combined_text, batch)
         )
 
     # ── Per-user context ─────────────────────────────────────────
@@ -631,7 +690,66 @@ class FeishuAdapter:
                 reply_to,
             )
 
-    # ── Agent loop integration ────────────────────────────────────
+    # ── Session serialization (P0-1) ──────────────────────────────
+
+    def _get_session_lock(self, key: str) -> asyncio.Lock:
+        if key not in self._session_locks:
+            self._session_locks[key] = asyncio.Lock()
+        # Prevent memory leak: prune unlocked entries above threshold
+        if len(self._session_locks) > 100:
+            self._session_locks = {
+                k: v for k, v in self._session_locks.items()
+                if v.locked() or k == key
+            }
+        return self._session_locks[key]
+
+    async def _serialized_process(
+        self, key: str, text: str, batch: PendingBatch,
+    ) -> None:
+        lock = self._get_session_lock(key)
+
+        if lock.locked():
+            await self._send_queue_card(key, batch)
+
+        async with lock:
+            task = asyncio.current_task()
+            self._running_tasks[key] = task
+            try:
+                await self._process_message(
+                    text,
+                    batch.chat_id,
+                    batch.chat_type,
+                    batch.sender_id,
+                    batch.sender_name,
+                    batch.first_message_id,
+                )
+            finally:
+                self._running_tasks.pop(key, None)
+
+            # Drain any messages that arrived while lock was held
+            while key in self._pending and self._pending[key].parts:
+                new_batch = self._pending.pop(key)
+                new_text = "\n".join(new_batch.parts)
+                await self._process_message(
+                    new_text,
+                    new_batch.chat_id,
+                    new_batch.chat_type,
+                    new_batch.sender_id,
+                    new_batch.sender_name,
+                    new_batch.first_message_id,
+                )
+
+    async def _send_queue_card(self, key: str, batch: PendingBatch) -> None:
+        try:
+            await self._dispatcher.send_card(
+                batch.chat_id,
+                "{{card:header=排队中,color=grey}}\n前一条消息正在处理，请稍候...",
+                batch.first_message_id,
+            )
+        except Exception:
+            pass  # queue hint failure must not block main flow
+
+        # ── Agent loop integration ────────────────────────────────────
 
     async def _process_message(
         self,
@@ -898,6 +1016,11 @@ class FeishuAdapter:
         session_key = f"feishu:{chat_id}:{sender_id}"
         result = ""
 
+        # Track in-flight media download
+        batch = self._pending.get(key)
+        if batch is not None:
+            batch.pending_media += 1
+
         try:
             if msg_type == "image":
                 image_key = content.get("image_key", "")
@@ -919,6 +1042,36 @@ class FeishuAdapter:
         except Exception as e:
             log.warning("Media processing failed: %s", e)
             result = f"[{msg_type} 处理失败: {e}]"
+
+        finally:
+            # Decrement pending_media counter
+            batch = self._pending.get(key)
+            if batch is not None:
+                batch.pending_media = max(0, batch.pending_media - 1)
+
+        if result:
+            await self._buffer_message(key, result, chat_id, chat_type, sender_id, message_id)
+
+    async def _handle_merge_forward(
+        self,
+        content: dict,
+        message_id: str,
+        key: str,
+        chat_id: str,
+        chat_type: str,
+        sender_id: str,
+    ) -> None:
+        """Expand merged-forward messages and buffer the text."""
+        try:
+            texts = await self._media.expand_merged_forward(message_id)
+            # Cap at 50 sub-messages
+            if len(texts) > 50:
+                texts = texts[:50]
+                texts.append(f"... [truncated, {len(texts)} sub-messages total]")
+            result = "\n---\n".join(texts) if texts else ""
+        except Exception as e:
+            log.warning("merge_forward expansion failed: %s", e)
+            result = f"[合并转发消息处理失败: {e}]"
 
         if result:
             await self._buffer_message(key, result, chat_id, chat_type, sender_id, message_id)
@@ -1134,6 +1287,20 @@ class FeishuAdapter:
                     log.info("Recall: cancelled debounce batch %s", debounce_key)
                     return
 
+                # P1-1: cancel running LLM task if in progress
+                task = self._running_tasks.get(debounce_key)
+                if task and not task.done():
+                    task.cancel()
+                    log.info("Recall: cancelled running task for %s", debounce_key)
+                    # Delete thinking card if present
+                    reply_mid = self._last_reply.pop(session_key, None)
+                    if reply_mid:
+                        try:
+                            await self._dispatcher.delete_message(reply_mid)
+                        except Exception:
+                            pass
+                    return
+
             # Remove last round from session history
             msgs = await self._sessions.get_recent_messages(session_key, limit=2)
             if msgs and len(msgs) >= 2:
@@ -1141,8 +1308,20 @@ class FeishuAdapter:
                 # by getting all messages and re-saving without the last 2
                 all_msgs = await self._sessions.get_messages(session_key)
                 if len(all_msgs) >= 2:
-                    # We can't easily delete individual messages, so note it in logs
-                    log.info("Recall: would remove last %d messages for %s", 2, session_key)
+                    # Delete last 2 messages (user + assistant round)
+                    await self._sessions.db.execute(
+                        """
+                        DELETE FROM messages WHERE rowid IN (
+                            SELECT rowid FROM messages
+                            WHERE session_key = ?
+                            ORDER BY created_at DESC
+                            LIMIT 2
+                        )
+                        """,
+                        (session_key,),
+                    )
+                    await self._sessions.db.commit()
+                    log.info("Recall: removed last round for %s", session_key)
 
             # Delete reply card from Feishu
             reply_mid = self._last_reply.pop(session_key, None)

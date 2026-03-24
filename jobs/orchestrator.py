@@ -31,6 +31,18 @@ class SubtaskResult:
 
 
 @dataclass
+class OrchestratorConfig:
+    """Per-node model configuration for the orchestrator pipeline.
+
+    Each field specifies the model ID for that pipeline stage.
+    Empty string means "use the same model as the caller" (default).
+    """
+    planner_model: str = ""   # model for task design / decomposition
+    worker_model: str = ""    # model for subtask execution
+    validator_model: str = "" # model for result validation
+
+
+@dataclass
 class TaskPlan:
     """Parsed task plan from <task_plan> JSON."""
     description: str
@@ -59,9 +71,11 @@ class Orchestrator:
         self,
         execute_fn: Callable[..., Coroutine] | None = None,
         notify_fn: Callable[..., Coroutine] | None = None,
+        config: OrchestratorConfig | None = None,
     ):
         self._execute = execute_fn
         self._notify = notify_fn
+        self._config = config or OrchestratorConfig()
         self._plans: list[TaskPlan] = []
 
     def parse_plan(self, json_str: str) -> TaskPlan | None:
@@ -115,9 +129,10 @@ class Orchestrator:
             result.status = "running"
             start = time.monotonic()
             try:
-                output = await self._execute(
-                    prompt=subtask.get("prompt", ""),
-                )
+                kwargs: dict[str, Any] = {"prompt": subtask.get("prompt", "")}
+                if self._config.worker_model:
+                    kwargs["model"] = self._config.worker_model
+                output = await self._execute(**kwargs)
                 result.status = "success"
                 result.output = str(output)[:2000] if output else ""
             except Exception as e:

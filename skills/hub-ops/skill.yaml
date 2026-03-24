@@ -1,0 +1,7 @@
+name: hub-ops
+display_name: Hub Operations
+description: 服务管理、定时任务 CRUD、调度器热加载、服务状态查询
+triggers:
+  - "定时任务|cron|调度|服务状态|重启|scheduler|任务列表"
+enabled: true
+priority: 5

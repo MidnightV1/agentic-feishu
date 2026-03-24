@@ -144,12 +144,17 @@ class AnthropicProvider(BaseProvider):
                 api_messages.append({"role": "assistant", "content": self._to_anthropic_assistant(msg)})
             elif msg.role == "tool":
                 # Tool results in Anthropic go as user messages with tool_result blocks
+                if isinstance(msg.content, list):
+                    # Multimodal content blocks (images, etc.) — pass directly
+                    tool_content = msg.content
+                else:
+                    tool_content = msg.content if isinstance(msg.content, str) else msg.text
                 api_messages.append({
                     "role": "user",
                     "content": [{
                         "type": "tool_result",
                         "tool_use_id": msg.tool_call_id,
-                        "content": msg.content if isinstance(msg.content, str) else msg.text,
+                        "content": tool_content,
                     }],
                 })
 

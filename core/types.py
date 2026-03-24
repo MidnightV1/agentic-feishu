@@ -32,10 +32,14 @@ class ToolCall:
 
 @dataclass
 class ToolResult:
-    """Result from executing a tool."""
+    """Result from executing a tool.
+
+    content: str for text results, list[dict] for multimodal blocks
+    (e.g. [{"type": "image", "source": {"type": "base64", ...}}]).
+    """
 
     tool_call_id: str
-    content: str
+    content: str | list[dict] = ""
     is_error: bool = False
 
 

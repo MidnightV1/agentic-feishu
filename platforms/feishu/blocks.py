@@ -23,6 +23,10 @@ _TABLE_ROW_RE = re.compile(r"^\|(.+)\|$")
 _TABLE_SEP_RE = re.compile(r"^\|[-\s|:]+\|$")
 _ORDERED_LIST_RE = re.compile(r"^(\d+)\.\s+(.+)$")
 _UNORDERED_LIST_RE = re.compile(r"^[-*]\s+(.+)$")
+
+# Indented list patterns (for nested list detection)
+_INDENTED_UNORDERED_RE = re.compile(r"^( {2,})[-*]\s+(.+)$")
+_INDENTED_ORDERED_RE = re.compile(r"^( {2,})(\d+)\.\s+(.+)$")
 _DIVIDER_RE = re.compile(r"^(-{3,}|<hr>)\s*$", re.IGNORECASE)
 _QUOTE_RE = re.compile(r"^>\s*(.*)$")
 
@@ -148,6 +152,86 @@ def split_table_rows(rows: list[list[str]]) -> list[list[list[str]]]:
     ]
 
 
+
+def _parse_list_line(line: str) -> tuple[int, int, str] | None:
+    """Parse a list line, returning (indent_level, block_type, text) or None.
+
+    indent_level: 0 for top-level, 1 for 2-space indent, 2 for 4-space, etc.
+    block_type: 12 (bullet) or 13 (ordered).
+    """
+    # Try indented unordered
+    m = _INDENTED_UNORDERED_RE.match(line)
+    if m:
+        level = len(m.group(1)) // 2
+        return level, 12, m.group(2)
+    # Try indented ordered
+    m = _INDENTED_ORDERED_RE.match(line)
+    if m:
+        level = len(m.group(1)) // 2
+        return level, 13, m.group(3)
+    # Try top-level unordered
+    stripped = line.strip()
+    m = _UNORDERED_LIST_RE.match(stripped)
+    if m:
+        return 0, 12, m.group(1)
+    # Try top-level ordered
+    m = _ORDERED_LIST_RE.match(stripped)
+    if m:
+        return 0, 13, m.group(2)
+    return None
+
+
+def _collect_nested_list(lines: list[str], start: int) -> list[dict] | None:
+    """Collect consecutive list lines starting at `start`.
+
+    Returns None if all items are level 0 (no nesting detected).
+    Returns a list of {"block": ..., "children": [...]} dicts for the
+    descendant API when nesting is present.
+    """
+    items: list[tuple[int, int, str]] = []  # (level, block_type, text)
+    j = start
+    while j < len(lines):
+        line = lines[j].rstrip()
+        if not line:
+            break
+        parsed = _parse_list_line(line)
+        if parsed is None:
+            break
+        items.append(parsed)
+        j += 1
+
+    if not items:
+        return None
+
+    # No nesting → keep flat output
+    if not any(level > 0 for level, _, _ in items):
+        return None
+
+    # Build nested structure for descendant API
+    result: list[dict] = []
+    idx = 0
+    while idx < len(items):
+        level, btype, text = items[idx]
+        key = "bullet" if btype == 12 else "ordered"
+        block = {
+            "block_type": btype,
+            key: {"elements": _parse_inline(text)},
+        }
+        children: list[dict] = []
+        idx += 1
+        while idx < len(items) and items[idx][0] > level:
+            clevel, cbtype, ctext = items[idx]
+            ckey = "bullet" if cbtype == 12 else "ordered"
+            children.append({
+                "block_type": cbtype,
+                ckey: {"elements": _parse_inline(ctext)},
+            })
+            idx += 1
+        result.append({"block": block, "children": children})
+
+    return result
+
+
 def text_to_blocks(markdown: str) -> list[dict[str, Any]]:
     """Convert markdown text to Feishu document blocks.
 
@@ -243,28 +327,40 @@ def text_to_blocks(markdown: str) -> list[dict[str, Any]]:
             i += 1
             continue
 
-        # Unordered list: - item or * item
+        # Unordered list: - item or * item (with nested list support)
         um = _UNORDERED_LIST_RE.match(line.strip())
         if um:
-            blocks.append({
-                "block_type": 12,
-                "bullet": {
-                    "elements": _parse_inline(um.group(1)),
-                },
-            })
-            i += 1
+            nested_items = _collect_nested_list(lines, i)
+            if nested_items is not None:
+                blocks.append({"_nested_list": nested_items})
+                count = sum(1 + len(item.get("children", [])) for item in nested_items)
+                i += count
+            else:
+                blocks.append({
+                    "block_type": 12,
+                    "bullet": {
+                        "elements": _parse_inline(um.group(1)),
+                    },
+                })
+                i += 1
             continue
 
-        # Ordered list: 1. item
+        # Ordered list: 1. item (with nested list support)
         om = _ORDERED_LIST_RE.match(line.strip())
         if om:
-            blocks.append({
-                "block_type": 13,
-                "ordered": {
-                    "elements": _parse_inline(om.group(2)),
-                },
-            })
-            i += 1
+            nested_items = _collect_nested_list(lines, i)
+            if nested_items is not None:
+                blocks.append({"_nested_list": nested_items})
+                count = sum(1 + len(item.get("children", [])) for item in nested_items)
+                i += count
+            else:
+                blocks.append({
+                    "block_type": 13,
+                    "ordered": {
+                        "elements": _parse_inline(om.group(2)),
+                    },
+                })
+                i += 1
             continue
 
         # Regular text block with inline formatting

@@ -1,4 +1,10 @@
-"""Streaming support — accumulates deltas into complete messages."""
+"""Streaming support — accumulates deltas into complete messages.
+
+NOTE: StreamAccumulator is not yet integrated into any provider.
+Providers currently handle streaming inline. This class is the intended
+unified streaming solution — to be wired into providers when we consolidate
+the streaming path. Do not remove.
+"""
 
 from __future__ import annotations
 

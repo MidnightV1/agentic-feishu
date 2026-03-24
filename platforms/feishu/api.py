@@ -1557,34 +1557,47 @@ class FeishuAPI:
         table_id: str,
         filter_expr: str = "",
         page_size: int = 20,
+        max_pages: int = 10,
     ) -> list:
-        """Query records from a Bitable table."""
-        token = await self._get_tenant_token()
-        url = (
-            f"{self.domain}/open-apis/bitable/v1/apps/{app_token}"
-            f"/tables/{table_id}/records/search"
-        )
-        body: dict[str, Any] = {"page_size": min(page_size, 100)}
-        if filter_expr:
-            body["filter"] = {"conjunction": "and", "conditions": []}
-            # Pass raw filter string — caller formats it
-            body["filter"] = filter_expr
-        try:
-            async with httpx.AsyncClient() as http:
-                resp = await http.post(
-                    url, headers={"Authorization": f"Bearer {token}"},
-                    json=body, timeout=30,
+        """Query records from a Bitable table with automatic pagination."""
+        all_records: list[dict] = []
+        page_token = ""
+
+        for _ in range(max_pages):
+            body: dict[str, Any] = {"page_size": min(page_size, 100)}
+            if filter_expr:
+                body["filter"] = filter_expr
+            if page_token:
+                body["page_token"] = page_token
+
+            try:
+                data = await self._raw_request(
+                    "POST",
+                    f"/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/search",
+                    body=body,
                 )
-                data = resp.json()
                 if data.get("code") != 0:
+                    if all_records:
+                        break  # Return what we have so far
                     return [{"error": f"{data.get('code')}: {data.get('msg')}"}]
+
                 items = data.get("data", {}).get("items", [])
-                return [
+                all_records.extend(
                     {"record_id": r["record_id"], "fields": r.get("fields", {})}
                     for r in items
-                ]
-        except Exception as e:
-            return [{"error": str(e)}]
+                )
+
+                if not data.get("data", {}).get("has_more"):
+                    break
+                page_token = data["data"].get("page_token", "")
+                if not page_token:
+                    break
+            except Exception as e:
+                if all_records:
+                    break
+                return [{"error": str(e)}]
+
+        return all_records
 
     async def add_bitable_record(
         self, app_token: str, table_id: str, fields: dict
@@ -1749,25 +1762,28 @@ class FeishuAPI:
     # ── Drive ──────────────────────────────────────────────────────
 
     async def list_drive_files(
-        self, folder_token: str = "", page_size: int = 20
+        self, folder_token: str = "", page_size: int = 20, max_pages: int = 10
     ) -> list:
-        """List files in a Drive folder."""
-        token = await self._get_tenant_token()
-        url = f"{self.domain}/open-apis/drive/v1/files"
-        params: dict[str, Any] = {"page_size": min(page_size, 50)}
-        if folder_token:
-            params["folder_token"] = folder_token
-        try:
-            async with httpx.AsyncClient() as http:
-                resp = await http.get(
-                    url, headers={"Authorization": f"Bearer {token}"},
-                    params=params, timeout=30,
-                )
-                data = resp.json()
+        """List files in a Drive folder with automatic pagination."""
+        all_files: list[dict] = []
+        page_token = ""
+
+        for _ in range(max_pages):
+            req_params: dict[str, Any] = {"page_size": min(page_size, 50)}
+            if folder_token:
+                req_params["folder_token"] = folder_token
+            if page_token:
+                req_params["page_token"] = page_token
+
+            try:
+                data = await self._raw_request("GET", "/open-apis/drive/v1/files", params=req_params)
                 if data.get("code") != 0:
+                    if all_files:
+                        break
                     return [{"error": f"{data.get('code')}: {data.get('msg')}"}]
+
                 items = data.get("data", {}).get("files", [])
-                return [
+                all_files.extend(
                     {
                         "token": f.get("token", ""),
                         "name": f.get("name", ""),
@@ -1775,9 +1791,19 @@ class FeishuAPI:
                         "url": f.get("url", ""),
                     }
                     for f in items
-                ]
-        except Exception as e:
-            return [{"error": str(e)}]
+                )
+
+                if not data.get("data", {}).get("has_more"):
+                    break
+                page_token = data["data"].get("page_token", "")
+                if not page_token:
+                    break
+            except Exception as e:
+                if all_files:
+                    break
+                return [{"error": str(e)}]
+
+        return all_files
 
     async def search_drive(self, query: str, count: int = 10) -> list:
         """Search files by name in Drive."""

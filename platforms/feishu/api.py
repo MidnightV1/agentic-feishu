@@ -406,7 +406,21 @@ class FeishuAPI:
         if row_count == 0 or col_count == 0:
             return None
 
-        # Step 1: Create empty table
+        # Calculate proportional column widths (CJK-aware)
+        TABLE_TOTAL_WIDTH = 700
+        MIN_COL_WIDTH = 60
+        max_lens = [0] * col_count
+        for row in rows:
+            for ci, cell in enumerate(row):
+                w = sum(2 if ord(c) > 0x7F else 1 for c in (cell or ""))
+                if w > max_lens[ci]:
+                    max_lens[ci] = w
+        max_lens = [max(length, 1) for length in max_lens]
+        total = sum(max_lens)
+        col_widths = [max(MIN_COL_WIDTH, int(TABLE_TOTAL_WIDTH * length / total))
+                      for length in max_lens]
+
+        # Step 1: Create empty table with calculated column widths
         resp = await self._raw_request(
             "POST",
             f"/open-apis/docx/v1/documents/{doc_id}/blocks/{doc_id}/children",
@@ -417,6 +431,7 @@ class FeishuAPI:
                         "property": {
                             "row_size": row_count,
                             "column_size": col_count,
+                            "column_width": col_widths,
                             "header_row": True,
                         }
                     }

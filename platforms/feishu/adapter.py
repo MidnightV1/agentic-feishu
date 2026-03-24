@@ -75,20 +75,23 @@ _LONG_THINKING = [
 # Personality-driven progress labels for tool use display.
 
 _TOOL_VERBS: dict[str, list[str]] = {
-    "search": ["翻箱倒柜中", "正在搜索", "搜刮中", "大海捞针..."],
-    "read": ["翻阅中", "正在读", "啃文档中", "细品中..."],
-    "create": ["创作中", "无中生有...", "正在编织", "变出来了..."],
-    "update": ["雕花中", "修改中", "外科手术中...", "填坑中..."],
+    "search": ["正在掘地三尺", "正在大海捞针", "正在顺藤摸瓜", "排查线索中...", "正在查水表", "翻箱倒柜中"],
+    "read": ["正在考古...", "正在审查屎山...", "正在认真阅读", "正在一目十行", "正在偷看源码...", "好长，但我假装看完了"],
+    "create": ["创作中...", "正在努力写bug...", "码字中...", "正在无中生有...", "正在编织", "变出来了..."],
+    "update": ["雕花中...", "填坑中...", "修改中...", "外科手术般精准修改...", "我改了，别慌"],
     "delete": ["销毁中", "抹除中...", "正在毁尸灭迹"],
-    "list": ["盘点中", "正在清点", "翻抽屉中..."],
+    "list": ["踩点中", "正在翻箱倒柜", "正在翻阅", "到处找人...", "盘点中"],
     "send": ["投递中", "飞鸽传书...", "正在发射"],
-    "bash": ["搞事中...", "正在鞭策主机", "按下了不该按的按钮..."],
-    "web": ["网上冲浪中", "正在请教互联网", "百度一下（才怪"],
+    "bash": ["搞事中...", "正在摇人", "正在鞭策主机", "听我口令...", "按下了不该按的按钮..."],
+    "web": ["上网查找", "正在搜索", "网上冲浪中", "百度一下（才怪", "正在请教互联网"],
     "calendar": ["翻日历中", "掐指一算...", "查黄历中..."],
-    "task": ["立 flag 中...", "写入小本本...", "先给自己画个饼"],
+    "task": ["立 flag 中...", "列清单", "写入小本本...", "先给自己画个饼"],
     "drive": ["翻云盘中", "正在找文件", "整理收纳中..."],
     "bitable": ["查表中", "翻账本...", "数据挖掘中..."],
     "perm": ["发通行证中", "门禁操作...", "授权中..."],
+    "agent": ["召唤分身", "正在裂开", "影分身！", "分身去打工了", "派出小弟..."],
+    "mcp": ["呼叫外援", "连线场外观众", "正在搬救兵...", "找了个帮手"],
+    "skill": ["上绝活", "放大招", "发动技能", "看招！"],
 }
 
 _TOOL_ICONS: dict[str, str] = {
@@ -96,6 +99,7 @@ _TOOL_ICONS: dict[str, str] = {
     "delete": "🗑️", "list": "📂", "send": "📮", "bash": "⚡",
     "web": "🌐", "calendar": "📅", "task": "📋", "drive": "💾",
     "bitable": "📊", "perm": "🔐",
+    "agent": "🤖", "mcp": "🔌", "skill": "🎯",
 }
 
 _FALLBACK_VERBS = ["搞事情中...", "施法中...", "炼丹中...", "整活中...", "正在变形..."]
@@ -120,7 +124,8 @@ _ACTION_CATEGORY: dict[str, str] = {
     "list": "list", "list_tables": "list", "list_comments": "read",
     "query": "bitable", "add_record": "bitable", "update_record": "bitable",
     "delete_record": "bitable",
-    "send_message": "send", "reply_comment": "send",
+    "send_message": "send", "reply_comment": "send", "analyze_comments": "read",
+    "archive_comments": "read",
     "transfer_owner": "perm", "complete": "task",
     "assign": "task", "unassign": "task", "snapshot": "task",
     "freebusy": "calendar", "move": "drive",

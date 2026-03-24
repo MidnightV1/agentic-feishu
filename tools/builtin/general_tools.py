@@ -54,13 +54,13 @@ async def write_file(path: str, content: str) -> str:
         return f"Error writing {path}: {e}"
 
 
-@tool(description="List files in a directory", parallel_safe=True)
+@tool(description="List files in a directory or find files matching a glob pattern (supports ** for recursive matching). Returns full paths.", parallel_safe=True)
 async def list_directory(path: str = ".", pattern: str = "") -> str:
-    """List files in a directory.
+    """List files in a directory or find files matching a glob pattern.
 
     Args:
         path: Directory path (default: current directory)
-        pattern: Optional glob pattern to filter (e.g., '*.py')
+        pattern: Optional glob pattern to filter (e.g., '*.py', '**/*.ts' for recursive)
     """
     path = os.path.expanduser(path)
     if not os.path.isdir(path):
@@ -68,17 +68,103 @@ async def list_directory(path: str = ".", pattern: str = "") -> str:
 
     try:
         if pattern:
-            import glob
-            matches = glob.glob(os.path.join(path, pattern))
-            entries = [os.path.basename(m) for m in sorted(matches)]
+            import glob as _glob
+            matches = _glob.glob(os.path.join(path, pattern), recursive=True)
+            entries = sorted(matches, key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0, reverse=True)
         else:
-            entries = sorted(os.listdir(path))
+            entries = [os.path.join(path, e) for e in sorted(os.listdir(path))]
 
         if not entries:
             return "(empty directory)"
-        return "\n".join(entries)
+        return "\n".join(entries[:200])
     except Exception as e:
         return f"Error listing {path}: {e}"
+
+
+@tool(description="Edit a file by exact string replacement. old_string must match exactly one location in the file. Use replace_all=true to replace all occurrences.", parallel_safe=False)
+async def edit_file(path: str, old_string: str, new_string: str, replace_all: bool = False) -> str:
+    """Edit a file by replacing exact string matches.
+
+    Args:
+        path: File path to edit
+        old_string: Exact text to find and replace
+        new_string: Replacement text (must differ from old_string)
+        replace_all: If true, replace all occurrences; otherwise require exactly one match
+    """
+    path = os.path.expanduser(path)
+    if not os.path.exists(path):
+        return f"Error: file not found: {path}"
+    if old_string == new_string:
+        return "Error: old_string and new_string are identical"
+    try:
+        content = open(path, "r", encoding="utf-8").read()
+        count = content.count(old_string)
+        if count == 0:
+            return "Error: old_string not found in file"
+        if count > 1 and not replace_all:
+            return f"Error: old_string found {count} times — set replace_all=true or provide more context"
+        new_content = content.replace(old_string, new_string) if replace_all else content.replace(old_string, new_string, 1)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(new_content)
+        replaced = count if replace_all else 1
+        return f"Replaced {replaced} occurrence(s) in {os.path.basename(path)}"
+    except Exception as e:
+        return f"Error editing {path}: {e}"
+
+
+@tool(description="Search file contents using regex pattern (like ripgrep). Returns matching lines with file paths and line numbers.", parallel_safe=True)
+async def grep(pattern: str, path: str = ".", glob_filter: str = "", max_results: int = 50) -> str:
+    """Search for a regex pattern in files.
+
+    Args:
+        pattern: Regular expression pattern to search for
+        path: File or directory to search in (default: current directory)
+        glob_filter: Optional glob to filter files (e.g., '*.py')
+        max_results: Maximum number of matching lines to return (default 50)
+    """
+    import re
+
+    path = os.path.expanduser(path)
+    results: list[str] = []
+
+    try:
+        regex = re.compile(pattern)
+    except re.error as e:
+        return f"Error: invalid regex: {e}"
+
+    def _search_file(fpath: str) -> None:
+        try:
+            with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                for lineno, line in enumerate(f, 1):
+                    if len(results) >= max_results:
+                        return
+                    if regex.search(line):
+                        results.append(f"{fpath}:{lineno}: {line.rstrip()}")
+        except (OSError, UnicodeDecodeError):
+            pass
+
+    if os.path.isfile(path):
+        _search_file(path)
+    elif os.path.isdir(path):
+        import fnmatch
+        for root, _dirs, files in os.walk(path):
+            # Skip hidden dirs and common noise
+            _dirs[:] = [d for d in _dirs if not d.startswith(".") and d not in ("node_modules", "__pycache__", ".git")]
+            for fname in files:
+                if len(results) >= max_results:
+                    break
+                if glob_filter and not fnmatch.fnmatch(fname, glob_filter):
+                    continue
+                _search_file(os.path.join(root, fname))
+    else:
+        return f"Error: path not found: {path}"
+
+    if not results:
+        return "No matches found"
+    output = "\n".join(results)
+    if len(results) >= max_results:
+        output += f"\n... (truncated at {max_results} results)"
+    return output
 
 
 @tool(description="Execute a shell command. Output truncated at 50KB. Use for system operations only — prefer dedicated tools when available.", parallel_safe=False, timeout=60.0)

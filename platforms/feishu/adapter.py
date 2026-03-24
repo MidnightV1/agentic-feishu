@@ -112,8 +112,9 @@ _TOOL_CATEGORY: dict[str, str] = {
     "feishu_bitable": "bitable", "feishu_sheet": "create",
     "feishu_drive": "drive", "feishu_perm": "perm",
     # General tools
-    "web_search": "web", "read_file": "read",
+    "web_search": "web", "read_file": "read", "grep": "search",
     "bash": "bash", "list_directory": "list", "write_file": "create",
+    "edit_file": "update",
 }
 
 

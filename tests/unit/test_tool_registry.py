@@ -23,7 +23,7 @@ class TestSchemaGeneration:
         def read_file(path: str) -> str:
             return ""
 
-        schema = read_file._tool_meta.schema
+        schema = read_file._tool_meta
         assert schema["parameters"]["properties"]["path"]["type"] == "string"
         assert "path" in schema["parameters"]["required"]
 
@@ -34,7 +34,7 @@ class TestSchemaGeneration:
         def read_file(path: str, encoding: str = "utf-8") -> str:
             return ""
 
-        schema = read_file._tool_meta.schema
+        schema = read_file._tool_meta
         assert "path" in schema["parameters"]["required"]
         assert "encoding" not in schema["parameters"]["required"]
 
@@ -45,7 +45,7 @@ class TestSchemaGeneration:
         def fn(x: Optional[int] = None) -> str:
             return ""
 
-        props = fn._tool_meta.schema["parameters"]["properties"]
+        props = fn._tool_meta["parameters"]["properties"]
         assert props["x"]["type"] == "integer"
 
     def test_list_type(self):
@@ -55,7 +55,7 @@ class TestSchemaGeneration:
         def fn(items: list[str]) -> str:
             return ""
 
-        props = fn._tool_meta.schema["parameters"]["properties"]
+        props = fn._tool_meta["parameters"]["properties"]
         assert props["items"]["type"] == "array"
         assert props["items"]["items"]["type"] == "string"
 
@@ -66,7 +66,7 @@ class TestSchemaGeneration:
         def fn(flag: bool = False) -> str:
             return ""
 
-        props = fn._tool_meta.schema["parameters"]["properties"]
+        props = fn._tool_meta["parameters"]["properties"]
         assert props["flag"]["type"] == "boolean"
 
     def test_docstring_param_description(self):
@@ -81,7 +81,7 @@ class TestSchemaGeneration:
             """
             return ""
 
-        props = read_file._tool_meta.schema["parameters"]["properties"]
+        props = read_file._tool_meta["parameters"]["properties"]
         assert "description" in props["path"]
         assert "file path" in props["path"]["description"].lower()
 
@@ -92,7 +92,7 @@ class TestSchemaGeneration:
         def get_time() -> str:
             return ""
 
-        schema = get_time._tool_meta.schema
+        schema = get_time._tool_meta
         assert schema["parameters"]["properties"] == {}
 
     def test_parallel_safe_flag(self):
@@ -106,8 +106,8 @@ class TestSchemaGeneration:
         def unsafe_fn() -> str:
             return ""
 
-        assert safe_fn._tool_meta.parallel_safe is True
-        assert unsafe_fn._tool_meta.parallel_safe is False
+        assert safe_fn._tool_meta["parallel_safe"] is True
+        assert unsafe_fn._tool_meta["parallel_safe"] is False
 
 
 class TestDeferredLoading:
@@ -121,7 +121,7 @@ class TestDeferredLoading:
             summary="飞书文档操作",
             description="这是完整的飞书文档操作手册，包含创建、读取、更新、删除等所有操作...",
             deferred=True,
-            handler=lambda **kw: "executed",
+            parameters={}, handler=lambda **kw: "executed",
         ))
         schemas = tool_registry.get_tool_schemas()
         doc = next(s for s in schemas if s["function"]["name"] == "feishu_doc")
@@ -135,11 +135,11 @@ class TestDeferredLoading:
         tool_registry.register(Tool(
             name="feishu_doc", summary="摘要",
             description=full_desc, deferred=True,
-            handler=lambda **kw: "should not execute",
+            parameters={}, handler=lambda **kw: "should not execute",
         ))
         result = await tool_registry.execute("feishu_doc", {"action": "create"})
         assert full_desc in result.content
-        assert tool_registry._tools["feishu_doc"].expanded is True
+        assert tool_registry.is_expanded("feishu_doc") is True
 
     async def test_second_call_executes(self, tool_registry):
         from core.tool_registry import Tool
@@ -148,7 +148,7 @@ class TestDeferredLoading:
         tool_registry.register(Tool(
             name="feishu_doc", summary="摘要",
             description="文档", deferred=True,
-            handler=lambda **kw: executed.append(True) or "done",
+            parameters={}, handler=lambda **kw: executed.append(True) or "done",
         ))
         await tool_registry.execute("feishu_doc", {})  # expand
         result = await tool_registry.execute("feishu_doc", {"action": "create"})
@@ -160,28 +160,27 @@ class TestDeferredLoading:
         tool_registry.register(Tool(
             name="feishu_doc", summary="摘要",
             description="文档", deferred=True,
-            handler=lambda **kw: "x",
+            parameters={}, handler=lambda **kw: "x",
         ))
         await tool_registry.execute("feishu_doc", {})
-        assert tool_registry._tools["feishu_doc"].expanded is True
+        assert tool_registry.is_expanded("feishu_doc") is True
         tool_registry.reset_expansions()
-        assert tool_registry._tools["feishu_doc"].expanded is False
+        assert tool_registry.is_expanded("feishu_doc") is False
 
 
 class TestSkillLoader:
-    """Skill discovery from directory structure."""
+    """Skill discovery from SKILL.md + tools.py."""
 
-    def test_discover_skill_from_yaml(self, tmp_path, tool_registry):
-        """skill.yaml + tools.py → tools registered."""
+    def test_discover_skill_from_md(self, tmp_path, tool_registry):
+        """SKILL.md + tools.py → tools registered."""
         skill_dir = tmp_path / "weather"
         skill_dir.mkdir()
-        (skill_dir / "skill.yaml").write_text(
+        (skill_dir / "SKILL.md").write_text(
+            "---\n"
             "name: weather\n"
             "description: Weather queries\n"
-            "triggers:\n"
-            '  - "天气|weather|气温"\n'
-            "enabled: true\n"
-            "priority: 10\n"
+            "---\n\n"
+            "Full weather documentation here.\n"
         )
         (skill_dir / "tools.py").write_text(
             "from core.tool_registry import tool\n\n"
@@ -194,22 +193,23 @@ class TestSkillLoader:
         assert "weather_query" in tool_registry._tools
 
     def test_disabled_skill_skipped(self, tmp_path, tool_registry):
-        skill_dir = tmp_path / "disabled"
+        """Skill disabled via config → tools not registered."""
+        skill_dir = tmp_path / "disabled_skill"
         skill_dir.mkdir()
-        (skill_dir / "skill.yaml").write_text(
-            "name: disabled\ndescription: X\nenabled: false\n"
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: disabled_skill\ndescription: X\n---\n"
         )
         (skill_dir / "tools.py").write_text(
             "from core.tool_registry import tool\n\n"
             "@tool(description='X')\ndef noop() -> str: return ''\n"
         )
         from skills.loader import load_skills
-        load_skills(tmp_path, tool_registry)
+        load_skills(tmp_path, tool_registry, disabled_skills={"disabled_skill"})
         assert "noop" not in tool_registry._tools
 
-    def test_missing_yaml_ignored(self, tmp_path, tool_registry):
+    def test_missing_skill_md_ignored(self, tmp_path, tool_registry):
         (tmp_path / "broken").mkdir()
-        (tmp_path / "broken" / "tools.py").write_text("# no yaml")
+        (tmp_path / "broken" / "tools.py").write_text("# no SKILL.md")
         from skills.loader import load_skills
         load_skills(tmp_path, tool_registry)
         assert len(tool_registry._tools) == 0
@@ -219,26 +219,26 @@ class TestTriggerMatching:
     """Skill trigger regex matching."""
 
     def test_regex_match(self):
-        from skills.loader import SkillInfo, SkillRegistry
+        from skills.loader import SkillConfig, SkillRegistry
 
         reg = SkillRegistry()
-        reg.register(SkillInfo(name="weather", triggers=[r"天气|weather"], priority=10))
+        reg.register(SkillConfig(name="weather", triggers=[r"天气|weather"], priority=10))
         match = reg.match_trigger("今天天气怎么样")
         assert match is not None
         assert match.name == "weather"
 
     def test_no_match(self):
-        from skills.loader import SkillInfo, SkillRegistry
+        from skills.loader import SkillConfig, SkillRegistry
 
         reg = SkillRegistry()
-        reg.register(SkillInfo(name="weather", triggers=[r"天气"], priority=10))
+        reg.register(SkillConfig(name="weather", triggers=[r"天气"], priority=10))
         assert reg.match_trigger("你好") is None
 
     def test_priority_order(self):
-        from skills.loader import SkillInfo, SkillRegistry
+        from skills.loader import SkillConfig, SkillRegistry
 
         reg = SkillRegistry()
-        reg.register(SkillInfo(name="specific", triggers=[r"飞书文档"], priority=20))
-        reg.register(SkillInfo(name="general", triggers=[r"飞书"], priority=10))
+        reg.register(SkillConfig(name="specific", triggers=[r"飞书文档"], priority=20))
+        reg.register(SkillConfig(name="general", triggers=[r"飞书"], priority=10))
         match = reg.match_trigger("帮我看飞书文档")
         assert match.name == "specific"

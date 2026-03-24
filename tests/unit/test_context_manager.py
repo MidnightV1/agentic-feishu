@@ -7,13 +7,15 @@ Covers:
 - Hybrid strategy: recent rounds preserved, older compressed
 - Fallback on compression failure
 """
+import asyncio
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 from core.types import Message, ToolCall
 from core.context_manager import (
-    ContextManager, ContextConfig,
-    _adjust_split_for_tool_groups, _keep_recent,
+    ContextManager, ContextConfig, ContextComponent,
+    _adjust_split_for_tool_groups, _keep_recent, _split_pinned,
 )
 
 
@@ -202,3 +204,164 @@ class TestTokenCounting:
         count_without = await mgr.count_tokens(messages, tools=None)
         assert count_with > count_without, \
             "Token count with tools must be higher than without"
+
+
+# ── _split_pinned ─────────────────────────────────────────
+
+class TestSplitPinned:
+    def test_system_messages_pinned(self):
+        messages = [
+            Message(role="system", content="You are helpful"),
+            Message(role="user", content="Hi"),
+            Message(role="assistant", content="Hello"),
+        ]
+        pinned, rest = _split_pinned(messages, pin_system=True)
+        assert len(pinned) == 1
+        assert pinned[0].role == "system"
+        assert len(rest) == 2
+
+    def test_system_not_pinned_when_disabled(self):
+        messages = [
+            Message(role="system", content="You are helpful"),
+            Message(role="user", content="Hi"),
+        ]
+        pinned, rest = _split_pinned(messages, pin_system=False)
+        assert len(pinned) == 0
+        assert len(rest) == 2
+
+
+# ── _keep_recent with tool groups ─────────────────────────
+
+class TestKeepRecentWithTools:
+    def test_preserves_tool_groups(self):
+        """_keep_recent should not split tool-call groups."""
+        messages = [
+            Message(role="user", content="Old question"),
+            Message(role="assistant", content="Old answer"),
+            Message(role="user", content="Read file"),
+            Message(role="assistant", content="", tool_calls=[
+                ToolCall(id="tc_1", name="read", arguments={}),
+            ]),
+            Message(role="tool", content="file content", tool_call_id="tc_1", name="read"),
+            Message(role="assistant", content="Here is the content"),
+            Message(role="user", content="Thanks"),
+            Message(role="assistant", content="Welcome"),
+        ]
+        recent = _keep_recent(messages, rounds=2)
+        # Should include the tool group (user+assistant+tool+assistant)
+        roles = [m.role for m in recent]
+        # Verify no orphaned tool results
+        for i, m in enumerate(recent):
+            if m.role == "tool":
+                assert i > 0 and recent[i - 1].role == "assistant"
+
+    def test_zero_rounds(self):
+        messages = make_conversation(5)
+        assert _keep_recent(messages, rounds=0) == messages
+
+    def test_empty_messages(self):
+        assert _keep_recent([], rounds=5) == []
+
+
+# ── build_system_prompt ────────────────────────────────────
+
+class TestBuildSystemPrompt:
+    async def test_priority_ordering(self):
+        mgr = _make_mgr()
+        components = [
+            ContextComponent(type="environment", content="env info", priority=10),
+            ContextComponent(type="soul", content="soul text", priority=100),
+            ContextComponent(type="persona", content="role text", priority=50),
+        ]
+        prompt = await mgr.build_system_prompt(components)
+        # Higher priority should come first
+        soul_pos = prompt.find("soul text")
+        persona_pos = prompt.find("role text")
+        env_pos = prompt.find("env info")
+        assert soul_pos < persona_pos < env_pos
+
+    async def test_empty_components_skipped(self):
+        mgr = _make_mgr()
+        components = [
+            ContextComponent(type="soul", content="content", priority=100),
+            ContextComponent(type="empty", content="", priority=50),
+        ]
+        prompt = await mgr.build_system_prompt(components)
+        assert "content" in prompt
+        assert "empty" not in prompt
+
+
+# ── Summarization ──────────────────────────────────────────
+
+class TestSummarization:
+    async def test_summarize_success(self):
+        mgr = _make_mgr()
+        mock_response = MagicMock()
+        mock_response.text = "Summary of conversation"
+        mgr.provider.chat = AsyncMock(return_value=mock_response)
+
+        messages = make_conversation(5)
+        result = await mgr._summarize(messages)
+        assert len(result) == 1
+        assert result[0].role == "system"
+        assert "Summary of conversation" in result[0].content
+
+    async def test_summarize_empty(self):
+        mgr = _make_mgr()
+        result = await mgr._summarize([])
+        assert result == []
+
+    async def test_summarize_timeout_uses_fallback(self):
+        mgr = _make_mgr(compress_timeout=1)
+        mgr.provider.chat = AsyncMock(side_effect=asyncio.TimeoutError)
+
+        fb = AsyncMock()
+        fb.name = "fallback"
+        mock_resp = MagicMock()
+        mock_resp.text = "Fallback summary"
+        fb.chat = AsyncMock(return_value=mock_resp)
+        mgr.fallback_provider = fb
+
+        messages = make_conversation(3)
+        result = await mgr._summarize(messages)
+        assert "Fallback summary" in result[0].content
+        fb.chat.assert_called_once()
+
+    async def test_summarize_all_fail_raises(self):
+        mgr = _make_mgr(compress_timeout=1)
+        mgr.provider.chat = AsyncMock(side_effect=Exception("primary fail"))
+        mgr.fallback_provider = None
+
+        messages = make_conversation(3)
+        with pytest.raises(RuntimeError, match="All compression providers failed"):
+            await mgr._summarize(messages)
+
+
+# ── Hybrid compress end-to-end ─────────────────────────────
+
+class TestHybridCompress:
+    async def test_hybrid_splits_old_and_recent(self):
+        mgr = _make_mgr(recent_rounds_keep=3)
+        mock_resp = MagicMock()
+        mock_resp.text = "Summary of old messages"
+        mgr.provider.chat = AsyncMock(return_value=mock_resp)
+
+        messages = make_conversation(10)
+        result = await mgr.compress(messages, strategy="hybrid")
+        # Should contain: summary + recent 3 rounds (6 messages)
+        contents = [m.content for m in result]
+        assert any("Summary" in c for c in contents)
+        assert "Question 9" in contents
+
+    async def test_hybrid_too_short_returns_original(self):
+        mgr = _make_mgr(recent_rounds_keep=5)
+        messages = make_conversation(3)  # 6 messages < 5*2=10
+        result = await mgr.compress(messages, strategy="hybrid")
+        assert result == messages
+
+    async def test_sliding_window_strategy(self):
+        mgr = _make_mgr(recent_rounds_keep=2)
+        messages = make_conversation(10)
+        result = await mgr.compress(messages, strategy="sliding_window")
+        assert len(result) == 4  # 2 rounds = 4 messages
+        assert result[0].content == "Question 8"

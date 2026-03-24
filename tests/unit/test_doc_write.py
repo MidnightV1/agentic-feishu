@@ -155,6 +155,59 @@ class TestAppendDocumentTables:
         assert result["blocks_added"] >= 1
 
 
+# ── append_document: rollback on failure ──
+
+
+class TestAppendDocumentRollback:
+    @pytest.mark.asyncio
+    async def test_rollback_deletes_created_blocks_on_exception(self, api):
+        """If flush raises, previously created block IDs should be deleted."""
+        call_count = [0]
+
+        async def side_effect(method, path, body=None, params=None):
+            call_count[0] += 1
+            if method == "POST" and "children" in path and "descendant" not in path:
+                if call_count[0] == 1:
+                    # First flush succeeds, returns block IDs
+                    return {"code": 0, "data": {"children": [
+                        {"block_id": "blk_a"}, {"block_id": "blk_b"},
+                    ]}}
+                else:
+                    # Second flush raises exception
+                    raise RuntimeError("network failure")
+            return {"code": 0, "data": {}}
+
+        api._raw_request = AsyncMock(side_effect=side_effect)
+        # 60 lines → 2 batches → first succeeds, second fails
+        lines = [f"Line {i}" for i in range(60)]
+        md = "\n".join(lines)
+
+        with pytest.raises(RuntimeError, match="network failure"):
+            await api.append_document("doc123", md)
+
+        # Rollback: should have called DELETE for blk_a and blk_b (reverse order)
+        delete_calls = [c for c in api._raw_request.call_args_list
+                        if c[0][0] == "DELETE"]
+        assert len(delete_calls) == 2
+        # Reverse order: blk_b first, blk_a second
+        assert "blk_b" in delete_calls[0][0][1]
+        assert "blk_a" in delete_calls[1][0][1]
+
+    @pytest.mark.asyncio
+    async def test_no_rollback_when_no_blocks_created(self, api):
+        """If failure happens before any blocks are created, no DELETE calls."""
+        api._raw_request = AsyncMock(side_effect=RuntimeError("immediate failure"))
+        md = "Hello world"
+
+        with pytest.raises(RuntimeError, match="immediate failure"):
+            await api.append_document("doc123", md)
+
+        # No DELETE calls since nothing was created
+        delete_calls = [c for c in api._raw_request.call_args_list
+                        if c[0][0] == "DELETE"]
+        assert len(delete_calls) == 0
+
+
 # ── _create_nested_list ──
 
 

@@ -1,5 +1,6 @@
 ---
-description: Manage Feishu Bitable / multidimensional tables (多维表格) — create apps, list tables, query/add/update/delete records with filtering. Use when the user mentions bitable, multidimensional table (多维表格), spreadsheet database (数据表), structured data, or wants to query/update table records in Feishu. DO NOT TRIGGER for regular spreadsheets (电子表格/单元格) — use feishu-sheet for those. Bitable is a database with typed fields and views; Sheet is a cell-based spreadsheet.
+name: feishu-bitable
+description: 飞书多维表格管理。用于创建应用、查看表格、查询/新增/更新/删除记录（支持筛选）。当用户提到多维表格、数据表、结构化数据、查询/更新表格记录时触发。注意：普通电子表格（单元格操作）用 feishu-sheet，多维表格是带类型字段和视图的数据库。
 ---
 
 # Feishu Bitable

@@ -1,5 +1,6 @@
 ---
-description: Structured communication via Feishu documents (飞书文档/结构化沟通). Use when the user wants to create a document (写个文档/建个文档), write up discussion results, read a Feishu doc link, save content to a Feishu document, review/reply to document comments (评论), or analyze document annotations. Also auto-trigger when output exceeds 1000 chars with 2+ dimensions/topics (超过1000字且涉及多维度时用文档而非聊天刷屏), or when a proposal needs discussion/confirmation (方案讨论用文档).
+name: feishu-doc
+description: 飞书文档（结构化沟通）。用于创建文档（写个文档/建个文档）、整理讨论结果、读取飞书文档链接、保存内容到文档、查看/回复文档评论。输出超过 1000 字且涉及多维度时自动触发（用文档而非聊天刷屏），方案讨论优先用文档（支持评论批注）。
 ---
 
 # Feishu Documents

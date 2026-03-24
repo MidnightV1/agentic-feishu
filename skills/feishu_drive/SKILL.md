@@ -1,5 +1,6 @@
 ---
-description: Manage Feishu Drive / cloud storage (云盘/云空间) — list files/folders, create folders, move/delete files, search. Use when the user mentions cloud drive (云盘/云空间), file management (文件管理), folders (文件夹), file organization (整理文件), finding files (找文件/找个文档). DO NOT TRIGGER for reading/writing document content — use feishu-doc for that. Drive manages the file tree; doc manages content inside a document.
+name: feishu-drive
+description: 飞书云盘/云空间管理。用于列出文件/文件夹、创建文件夹、移动/删除文件、搜索。当用户提到云盘、文件管理、文件夹、整理文件、找文件时触发。注意：读写文档内容用 feishu-doc，云盘管理文件树。
 ---
 
 # Feishu Drive

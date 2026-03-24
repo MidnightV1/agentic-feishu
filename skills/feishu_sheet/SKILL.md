@@ -1,5 +1,6 @@
 ---
-description: Manage Feishu Spreadsheets (电子表格) — create spreadsheets, get metadata, list worksheets, read/write cell ranges. Use when the user mentions spreadsheet (电子表格/表格), cells (单元格), rows/columns, or wants to read/write data in a Feishu spreadsheet. NOT for Bitable/multidimensional tables (多维表格) — use feishu-bitable for those.
+name: feishu-sheet
+description: 飞书电子表格管理。用于创建表格、获取元数据、列出工作表、读写单元格区域。当用户提到电子表格、单元格、行列操作时触发。注意：多维表格用 feishu-bitable，电子表格是基于单元格的传统表格。
 ---
 
 # Feishu Sheet

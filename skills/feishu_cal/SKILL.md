@@ -1,5 +1,6 @@
 ---
-description: Manage Feishu calendar events (日历/日程) — create, list, update, delete events, invite attendees. Use when the user mentions meetings (会议/开会), schedule (日程/排期), calendar (日历), events, appointments, blocking time (约时间), or inviting people. Calendar answers "什么时候在哪做什么" — time-anchored events you need to "be present" for.
+name: feishu-cal
+description: 飞书日历日程管理。用于创建、查看、更新、删除日程，邀请参会人。当用户提到会议（会议/开会）、日程（日程/排期）、日历、约时间、邀请人时触发。日历回答「什么时候在哪做什么」——需要到场的时间锚定事件。
 ---
 
 # Feishu Calendar

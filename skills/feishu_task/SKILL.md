@@ -1,5 +1,6 @@
 ---
-description: Track commitments and follow-ups as Feishu tasks (任务/待办/承诺追踪). Use when the user mentions tasks (任务), to-do items (待办/todo), deadlines (截止日期/ddl), task assignments (指派), or makes implicit commitments like "记得提醒我..."、"别忘了..."、"下周之前要...". Also triggered by discussion action items, bot-discovered follow-ups (code TODOs, failed jobs), and async handoffs ("帮我查一下X，周五前给我"). Task answers "什么事要记得做完，截止时间是什么" — stateful items that need completion tracking.
+name: feishu-task
+description: 飞书任务（承诺与待办追踪）。用于创建、查看、更新任务，设置截止日期，指派负责人。当用户提到任务（任务/待办/todo）、截止日期（ddl）、承诺（记得提醒我/别忘了/下周之前要）时触发。任务回答「什么事要记得做完」——需要完成追踪的状态项。
 ---
 
 # Feishu Tasks

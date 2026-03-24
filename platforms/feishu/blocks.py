@@ -32,19 +32,20 @@ _QUOTE_RE = re.compile(r"^>\s*(.*)$")
 
 # Language mapping for Feishu code blocks
 _CODE_LANG_MAP = {
+    # Ref: DocxCodeLanguage enum (chyroc/lark type_docx.go)
     "": 1, "text": 1, "plaintext": 1,
-    "bash": 7, "sh": 7, "shell": 61, "zsh": 7,
+    "bash": 7, "sh": 7, "shell": 60, "zsh": 7,
     "c": 10, "cpp": 9, "c++": 9, "csharp": 8, "c#": 8,
     "css": 12, "dart": 15, "dockerfile": 18,
-    "go": 23, "groovy": 24, "html": 25, "http": 27,
-    "java": 30, "javascript": 31, "js": 31,
-    "json": 29, "kotlin": 33, "latex": 34, "lua": 37,
-    "makefile": 39, "markdown": 40, "md": 40,
-    "nginx": 41, "objc": 42, "objective-c": 42,
-    "php": 44, "perl": 45, "powershell": 47,
-    "python": 50, "py": 50, "r": 51, "ruby": 53, "rust": 54,
-    "scss": 56, "sql": 57, "scala": 58, "swift": 62,
-    "typescript": 64, "ts": 64, "xml": 67, "yaml": 68, "yml": 68,
+    "go": 22, "groovy": 23, "html": 24, "http": 26,
+    "java": 29, "javascript": 30, "js": 30,
+    "json": 28, "kotlin": 32, "latex": 33, "lua": 36,
+    "makefile": 38, "markdown": 39, "md": 39,
+    "nginx": 40, "objc": 41, "objective-c": 41,
+    "php": 43, "perl": 44, "powershell": 46,
+    "python": 49, "py": 49, "r": 50, "ruby": 52, "rust": 53,
+    "scss": 55, "sql": 56, "scala": 57, "swift": 61,
+    "typescript": 63, "ts": 63, "xml": 66, "yaml": 67, "yml": 67,
 }
 
 # Table limits (Feishu docx API)
@@ -58,17 +59,36 @@ def _sanitize_doc_text(text: str) -> str:
     return re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
 
 
-# Combined pattern for inline formatting: bold, italic, code, links
+# Combined pattern for inline formatting: bold, italic, strikethrough, code, links
 _INLINE_RE = re.compile(
-    r"\*\*(.+?)\*\*"              # bold
-    r"|\*(.+?)\*"                 # italic
-    r"|`(.+?)`"                   # inline code
-    r"|\[([^\]]+)\]\(([^)]+)\)"   # link
+    r"\*\*(.+?)\*\*"              # group 1: bold
+    r"|~~(.+?)~~"                 # group 2: strikethrough
+    r"|\*(.+?)\*"                 # group 3: italic
+    r"|`(.+?)`"                   # group 4: inline code
+    r"|\[([^\]]+)\]\(([^)]+)\)"   # group 5,6: link
+)
+
+# HTML tags that appear in Feishu card markdown but not supported in doc blocks
+_HTML_STRIP_RE = re.compile(
+    r"<font\s+color=['\"]?\w+['\"]?>(.*?)</font>"    # <font color='red'>text</font>
+    r"|<text_tag\s+color=['\"]?\w+['\"]?>(.*?)</text_tag>"  # <text_tag color='blue'>text</text_tag>
+    r"|<at\s+id=['\"]?[\w]+['\"]?>\s*</at>"           # <at id=open_id></at>
 )
 
 
+def _strip_html_tags(text: str) -> str:
+    """Strip Feishu card HTML tags, keeping inner text content."""
+    def _replace(m: re.Match) -> str:
+        # Return first non-None group (the inner text), or empty string for <at>
+        return m.group(1) or m.group(2) or ""
+    return _HTML_STRIP_RE.sub(_replace, text)
+
+
 def _parse_inline(text: str) -> list[dict]:
-    """Parse inline markdown (bold, italic, code, link) into Feishu text elements."""
+    """Parse inline markdown (bold, italic, strikethrough, code, link) into Feishu text elements."""
+    # Pre-process: strip HTML tags not supported in doc blocks
+    text = _strip_html_tags(text)
+
     elements: list[dict] = []
     pos = 0
 
@@ -81,25 +101,30 @@ def _parse_inline(text: str) -> list[dict]:
                 "content": m.group(1),
                 "text_element_style": {"bold": True},
             }})
-        elif m.group(2):  # italic
+        elif m.group(2):  # strikethrough
             elements.append({"text_run": {
                 "content": m.group(2),
-                "text_element_style": {"italic": True},
+                "text_element_style": {"strikethrough": True},
             }})
-        elif m.group(3):  # inline code
+        elif m.group(3):  # italic
             elements.append({"text_run": {
                 "content": m.group(3),
+                "text_element_style": {"italic": True},
+            }})
+        elif m.group(4):  # inline code
+            elements.append({"text_run": {
+                "content": m.group(4),
                 "text_element_style": {"inline_code": True},
             }})
-        elif m.group(4):  # link
-            url = m.group(5)
+        elif m.group(5):  # link
+            url = m.group(6)
             if url.startswith("http://") or url.startswith("https://"):
                 elements.append({"text_run": {
-                    "content": m.group(4),
+                    "content": m.group(5),
                     "text_element_style": {"link": {"url": url}},
                 }})
             else:
-                elements.append({"text_run": {"content": m.group(4)}})
+                elements.append({"text_run": {"content": m.group(5)}})
         pos = m.end()
 
     if pos < len(text):
@@ -241,6 +266,8 @@ def text_to_blocks(markdown: str) -> list[dict[str, Any]]:
     """
     markdown = markdown.replace("\\n", "\n")
     markdown = _sanitize_doc_text(markdown)
+    # Strip card header syntax (chat-only, not for docs)
+    markdown = re.sub(r"^\{\{card:.*?\}\}\s*\n?", "", markdown)
     lines = markdown.split("\n")
     blocks: list[dict] = []
     i = 0
@@ -315,11 +342,13 @@ def text_to_blocks(markdown: str) -> list[dict[str, Any]]:
             i += 1
             continue
 
-        # Blockquote: > text → ▎prefix
+        # Blockquote: > text → ▎prefix with inline formatting
         qm = _QUOTE_RE.match(line)
         if qm:
             content = qm.group(1) or ""
-            elements = [{"text_run": {"content": f"▎{content}" if content else "▎"}}]
+            elements = [{"text_run": {"content": "▎"}}]
+            if content:
+                elements.extend(_parse_inline(content))
             blocks.append({
                 "block_type": 2,
                 "text": {"elements": elements},

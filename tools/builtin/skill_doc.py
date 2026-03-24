@@ -11,11 +11,19 @@ import logging
 from typing import Any
 
 from core.tool_registry import tool
+from tools.builtin._user_context import get_current_user_id
+from tools.common.url_parser import extract_token
+from tools.common.validators import validate_required, validate_action
 
 log = logging.getLogger("agentic.tools.skill_doc")
 
 # Module-level API client — set by configure()
 _api: Any = None
+
+DOC_ACTIONS = {
+    "create", "read", "append", "update", "replace_section", "search",
+    "list_comments", "reply_comment", "transfer_owner", "send_message",
+}
 
 
 def configure(api: Any) -> None:
@@ -30,64 +38,71 @@ def _require_api() -> Any:
     return _api
 
 
-@tool(
-    summary="Feishu document operations: create, read, append, update, replace_section, search, list_comments, reply_comment, transfer_owner, send_message",
-    deferred=True,
-    description="""Feishu document operations.
-
-Actions:
-- create: Create document. params: {title, folder_token?}. MUST add requesting user as full_access collaborator after creation. Returns full link: https://feishu.cn/docx/{document_id}.
-- read: Read document content. params: {document_id}
-- append: Append markdown content to document. params: {document_id, content}. Do NOT create a new doc if one already exists on the same topic.
-- update: Replace ALL content in document (destructive). params: {document_id, content}. Prefer append or replace_section for partial updates.
-- replace_section: Replace a section identified by its heading. params: {document_id, heading_title, new_content}. Deletes from matched heading to next same-level heading, then inserts new_content.
-- search: Search documents by keyword. params: {query, count?=10}. Use short keywords, not full sentences.
-- list_comments: List comments on a document. params: {document_id}
-- reply_comment: Reply to a comment. params: {document_id, comment_id, content}
-- transfer_owner: Transfer document ownership (IRREVERSIBLE — confirm with user first). params: {document_id, new_owner_id}
-- send_message: Send message to a Feishu chat. params: {chat_id, text}. Only when user EXPLICITLY requests it. Never proactively send to other chats.
-""", parallel_safe=False,
-)
+@tool(deferred=True, parallel_safe=False)
 async def feishu_doc(action: str, params: dict) -> dict:
     """Dispatch Feishu document operations by action name.
 
     Args:
         action: One of create, read, append, update, replace_section, search,
-                list_comments, reply_comment, transfer_owner
+                list_comments, reply_comment, transfer_owner, send_message
         params: Action-specific parameters (see tool description)
     """
     api = _require_api()
+    validate_action(action, DOC_ACTIONS, "feishu_doc")
+
+    # Auto-extract token from Feishu URLs for all doc_id-bearing actions
+    if "document_id" in params and params["document_id"]:
+        params["document_id"] = extract_token(params["document_id"])
 
     if action == "create":
-        return await api.create_document(
+        validate_required(params, ["title"])
+        if not params.get("force"):
+            title = params["title"]
+            existing = await api.search_documents(title, count=5)
+            for doc in existing:
+                if doc.get("title") == title:
+                    return {
+                        "status": "duplicate_found",
+                        "message": f"已存在同名文档：{title}。确认要创建？请设置 force=true",
+                        "existing": doc,
+                    }
+        result = await api.create_document(
             title=params.get("title", ""),
             folder_token=params.get("folder_token", ""),
         )
+        from skills.feishu_perm.lib.perm_ops import ensure_user_access
+
+        user_id = get_current_user_id()
+        if user_id and result.get("document_id"):
+            perm_result = await ensure_user_access(api, result["document_id"], "docx", user_id)
+            result["auto_collaborator"] = user_id
+            if not perm_result.get("success"):
+                result["auto_collaborator_error"] = perm_result.get("error", "unknown")
+        return result
 
     elif action == "read":
-        content = await api.get_document_content(params.get("document_id", ""))
+        validate_required(params, ["document_id"])
+        content = await api.get_document_content(params["document_id"])
         return {"content": content}
 
     elif action == "append":
-        return await api.append_document(
-            params.get("document_id", ""),
-            params.get("content", ""),
-        )
+        validate_required(params, ["document_id", "content"])
+        return await api.append_document(params["document_id"], params["content"])
 
     elif action == "update":
-        return await api.update_document(
-            params.get("document_id", ""),
-            params.get("content", ""),
-        )
+        validate_required(params, ["document_id", "content"])
+        return await api.update_document(params["document_id"], params["content"])
 
     elif action == "replace_section":
+        validate_required(params, ["document_id", "heading_title", "new_content"])
         return await api.replace_section(
-            params.get("document_id", ""),
-            params.get("heading_title", ""),
-            params.get("new_content", ""),
+            params["document_id"],
+            params["heading_title"],
+            params["new_content"],
         )
 
     elif action == "search":
+        validate_required(params, ["query"])
         results = await api.search_documents(
             params.get("query", ""),
             count=params.get("count", 10),
@@ -95,27 +110,31 @@ async def feishu_doc(action: str, params: dict) -> dict:
         return {"results": results}
 
     elif action == "list_comments":
-        comments = await api.list_comments(params.get("document_id", ""))
+        validate_required(params, ["document_id"])
+        comments = await api.list_comments(params["document_id"])
         return {"comments": comments}
 
     elif action == "reply_comment":
+        validate_required(params, ["document_id", "comment_id", "content"])
         return await api.reply_comment(
-            params.get("document_id", ""),
-            params.get("comment_id", ""),
-            params.get("content", ""),
+            params["document_id"],
+            params["comment_id"],
+            params["content"],
         )
 
     elif action == "transfer_owner":
-        return await api.transfer_document_owner(
-            params.get("document_id", ""),
-            params.get("new_owner_id", ""),
-        )
+        validate_required(params, ["document_id", "new_owner_id"])
+        if not params.get("confirmed"):
+            return {
+                "status": "confirmation_required",
+                "message": f"转交文档所有权不可逆。确认转交给 {params['new_owner_id']}？请重新调用并设置 confirmed=true",
+                "action": action,
+                "params": params,
+            }
+        return await api.transfer_document_owner(params["document_id"], params["new_owner_id"])
 
     elif action == "send_message":
         return await api.send_message(
             params.get("chat_id", ""),
             params.get("text", ""),
         )
-
-    else:
-        return {"error": f"Unknown action: {action!r}. Valid actions: create, read, append, update, replace_section, search, list_comments, reply_comment, transfer_owner, send_message"}

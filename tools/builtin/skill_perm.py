@@ -7,10 +7,14 @@ import logging
 from typing import Any
 
 from core.tool_registry import tool
+from tools.common.url_parser import extract_token
+from tools.common.validators import validate_required, validate_enum, validate_action, VALID_PERM_TYPES
 
 log = logging.getLogger("agentic.tools.skill_perm")
 
 _api: Any = None
+
+PERM_ACTIONS = {"list", "get_sharing", "add", "remove", "set_sharing"}
 
 
 def configure(api: Any) -> None:
@@ -25,19 +29,7 @@ def _require_api() -> Any:
     return _api
 
 
-@tool(
-    summary="Feishu document permission operations: list, get_sharing, add, remove, set_sharing",
-    deferred=True,
-    description="""Feishu document permission operations.
-
-Actions:
-- list: List collaborators. params: {doc_token, doc_type?="docx"}
-- get_sharing: Get public sharing settings. params: {doc_token, doc_type?="docx"}
-- add: Add collaborator. params: {doc_token, member_id, perm?="full_access", member_type?="openid", doc_type?="docx"}
-- remove: Remove collaborator (IRREVERSIBLE). params: {doc_token, member_id, member_type?="openid", doc_type?="docx"}
-- set_sharing: Set link sharing. params: {doc_token, link_share_entity?="tenant_readable", doc_type?="docx"}. Values: "anyone_readable", "anyone_editable", "tenant_readable", "tenant_editable", "closed"
-""", parallel_safe=False,
-)
+@tool(deferred=True, parallel_safe=False)
 async def feishu_perm(action: str, params: dict = {}) -> dict | list:
     """Dispatch permission operations by action name.
 
@@ -46,18 +38,27 @@ async def feishu_perm(action: str, params: dict = {}) -> dict | list:
         params: Action-specific parameters (see description)
     """
     api = _require_api()
+    validate_action(action, PERM_ACTIONS, "feishu_perm")
+
+    # Auto-extract token from Feishu URLs
+    if "doc_token" in params and params["doc_token"]:
+        params["doc_token"] = extract_token(params["doc_token"])
 
     if action == "list":
+        validate_required(params, ["doc_token"])
         doc_token = params.get("doc_token", "")
         doc_type = params.get("doc_type", "docx")
         return await api.list_collaborators(doc_token, doc_type)
 
     elif action == "get_sharing":
+        validate_required(params, ["doc_token"])
         doc_token = params.get("doc_token", "")
         doc_type = params.get("doc_type", "docx")
         return await api.get_public_sharing(doc_token, doc_type)
 
     elif action == "add":
+        validate_required(params, ["doc_token", "member_id"])
+        validate_enum(params.get("perm", "full_access"), VALID_PERM_TYPES, "perm")
         doc_token = params.get("doc_token", "")
         member_id = params.get("member_id", "")
         perm = params.get("perm", "full_access")
@@ -66,6 +67,7 @@ async def feishu_perm(action: str, params: dict = {}) -> dict | list:
         return await api.add_collaborator(doc_token, member_id, perm, member_type, doc_type)
 
     elif action == "remove":
+        validate_required(params, ["doc_token", "member_id"])
         doc_token = params.get("doc_token", "")
         member_id = params.get("member_id", "")
         member_type = params.get("member_type", "openid")
@@ -73,10 +75,8 @@ async def feishu_perm(action: str, params: dict = {}) -> dict | list:
         return await api.remove_collaborator(doc_token, member_id, member_type, doc_type)
 
     elif action == "set_sharing":
+        validate_required(params, ["doc_token"])
         doc_token = params.get("doc_token", "")
         link_share_entity = params.get("link_share_entity", "tenant_readable")
         doc_type = params.get("doc_type", "docx")
         return await api.set_public_sharing(doc_token, link_share_entity, doc_type)
-
-    else:
-        return {"error": f"Unknown action: {action}"}

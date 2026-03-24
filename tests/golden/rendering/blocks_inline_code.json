@@ -1,0 +1,27 @@
+[
+  {
+    "block_type": 2,
+    "text": {
+      "elements": [
+        {
+          "text_run": {
+            "content": "Use "
+          }
+        },
+        {
+          "text_run": {
+            "content": "print()",
+            "text_element_style": {
+              "inline_code": true
+            }
+          }
+        },
+        {
+          "text_run": {
+            "content": " function"
+          }
+        }
+      ]
+    }
+  }
+]

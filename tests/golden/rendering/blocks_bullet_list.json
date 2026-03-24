@@ -1,0 +1,38 @@
+[
+  {
+    "block_type": 12,
+    "bullet": {
+      "elements": [
+        {
+          "text_run": {
+            "content": "item 1"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "block_type": 12,
+    "bullet": {
+      "elements": [
+        {
+          "text_run": {
+            "content": "item 2"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "block_type": 12,
+    "bullet": {
+      "elements": [
+        {
+          "text_run": {
+            "content": "item 3"
+          }
+        }
+      ]
+    }
+  }
+]

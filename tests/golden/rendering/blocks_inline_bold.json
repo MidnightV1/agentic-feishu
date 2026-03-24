@@ -1,0 +1,27 @@
+[
+  {
+    "block_type": 2,
+    "text": {
+      "elements": [
+        {
+          "text_run": {
+            "content": "This is "
+          }
+        },
+        {
+          "text_run": {
+            "content": "bold",
+            "text_element_style": {
+              "bold": true
+            }
+          }
+        },
+        {
+          "text_run": {
+            "content": " text"
+          }
+        }
+      ]
+    }
+  }
+]

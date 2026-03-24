@@ -1,0 +1,45 @@
+[
+  {
+    "block_type": 2,
+    "text": {
+      "elements": [
+        {
+          "text_run": {
+            "content": "Bold",
+            "text_element_style": {
+              "bold": true
+            }
+          }
+        },
+        {
+          "text_run": {
+            "content": " and "
+          }
+        },
+        {
+          "text_run": {
+            "content": "code",
+            "text_element_style": {
+              "inline_code": true
+            }
+          }
+        },
+        {
+          "text_run": {
+            "content": " and "
+          }
+        },
+        {
+          "text_run": {
+            "content": "link",
+            "text_element_style": {
+              "link": {
+                "url": "https://x.com"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+]

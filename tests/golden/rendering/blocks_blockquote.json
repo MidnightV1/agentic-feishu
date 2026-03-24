@@ -1,0 +1,36 @@
+[
+  {
+    "block_type": 2,
+    "text": {
+      "elements": [
+        {
+          "text_run": {
+            "content": "▎"
+          }
+        },
+        {
+          "text_run": {
+            "content": "This is a quote"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "block_type": 2,
+    "text": {
+      "elements": [
+        {
+          "text_run": {
+            "content": "▎"
+          }
+        },
+        {
+          "text_run": {
+            "content": "with two lines"
+          }
+        }
+      ]
+    }
+  }
+]

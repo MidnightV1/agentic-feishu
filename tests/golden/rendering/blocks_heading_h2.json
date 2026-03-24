@@ -1,0 +1,14 @@
+[
+  {
+    "block_type": 4,
+    "heading2": {
+      "elements": [
+        {
+          "text_run": {
+            "content": "二级标题"
+          }
+        }
+      ]
+    }
+  }
+]

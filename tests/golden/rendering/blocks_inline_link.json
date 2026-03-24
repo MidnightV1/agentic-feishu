@@ -1,0 +1,24 @@
+[
+  {
+    "block_type": 2,
+    "text": {
+      "elements": [
+        {
+          "text_run": {
+            "content": "Visit "
+          }
+        },
+        {
+          "text_run": {
+            "content": "Google",
+            "text_element_style": {
+              "link": {
+                "url": "https://www.google.com"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+]

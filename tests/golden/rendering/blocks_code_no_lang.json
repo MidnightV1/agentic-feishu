@@ -1,0 +1,17 @@
+[
+  {
+    "block_type": 14,
+    "code": {
+      "style": {
+        "language": 1
+      },
+      "elements": [
+        {
+          "text_run": {
+            "content": "plain code block"
+          }
+        }
+      ]
+    }
+  }
+]

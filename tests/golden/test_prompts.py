@@ -12,14 +12,14 @@ class TestFrozenPrompts:
     """Prompt exact-match tests. Changes trigger golden diff for human review."""
 
     def test_summary_prompt(self, update_golden):
-        """Compression prompt — must retain 'excluded X because Y' per D2."""
+        """Compression prompt — 9 sections, preserves corrections and full paths."""
         from core.context_manager import SUMMARY_PROMPT
         assert_golden("prompts/summary_prompt.txt", SUMMARY_PROMPT, update_golden)
-        # D2 decision: these hub lines must be present
-        assert "排除" in SUMMARY_PROMPT, \
-            "SUMMARY_PROMPT missing '排除了 X，因为 Y' (hub alignment per D2)"
-        assert "代码修改只记录" in SUMMARY_PROMPT or "改了哪些文件" in SUMMARY_PROMPT, \
-            "SUMMARY_PROMPT missing code-change summary rule (hub alignment per D2)"
+        # Core requirements: user corrections highest weight, no abbreviations
+        assert "纠正" in SUMMARY_PROMPT or "偏好" in SUMMARY_PROMPT, \
+            "SUMMARY_PROMPT must preserve user corrections and preferences"
+        assert "文件路径" in SUMMARY_PROMPT, \
+            "SUMMARY_PROMPT must preserve full file paths"
 
     def test_recovery_preamble(self, update_golden):
         """Session recovery preamble injected into system prompt."""
@@ -56,7 +56,7 @@ class TestPromptStructure:
 
     def test_summary_prompt_has_required_sections(self):
         from core.context_manager import SUMMARY_PROMPT
-        for section in ["对话主题", "关键决策", "当前状态", "涉及的文件", "用户偏好"]:
+        for section in ["主要请求", "关键技术", "文件与代码", "错误与修复", "待完成"]:
             assert section in SUMMARY_PROMPT, f"Missing section: {section}"
 
     def test_recovery_preamble_no_cli_reference(self):

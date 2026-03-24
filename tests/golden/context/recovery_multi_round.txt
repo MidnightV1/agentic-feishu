@@ -1,0 +1,50 @@
+## 会话恢复
+
+你的上一个会话已结束，以下是之前对话的记录。
+注意：之前的工具调用记录（文件读写、命令执行）不可访问，如需读取文件请重新操作。
+
+
+
+**用户**: 帮我分析一下项目结构
+
+**助手**: 好的，让我先看看目录结构。
+
+**用户**: 重点看 src/ 目录
+
+**助手**: src/ 下有 main.py、utils.py 和 config.py 三个文件。main.py 是入口，utils.py 是工具函数，config.py 管理配置。
+
+**用户**: utils.py 里有什么函数？
+
+**助手**: utils.py 包含 parse_date()、format_output() 和 validate_input() 三个函数。
+
+**用户**: parse_date 的逻辑是什么？
+
+**助手**: parse_date 支持三种格式：ISO 8601、相对时间（如 +2h）和自然语言（如 tomorrow 09:00）。内部用 datetime 和 re 模块实现。
+
+**用户**: 能不能加一个支持中文日期的功能？
+
+**助手**: 可以。建议在 parse_date 中增加一个分支，用正则匹配「X月X日」格式，转换为 datetime 对象。
+
+**用户**: 好的，那就这么做
+
+**助手**: 我已经在 parse_date 函数中添加了中文日期解析，支持「3月23日」和「2026年3月23日」两种格式。
+
+**用户**: 测试一下
+
+**助手**: 测试通过。parse_date('3月23日') 返回 2026-03-23，parse_date('2026年3月23日') 也正确。
+
+**用户**: 提交吧
+
+**助手**: 已提交，commit message: feat(utils): add Chinese date format support in parse_date
+
+**用户**: 顺便看下 config.py 有没有什么问题
+
+**助手**: config.py 有个潜在问题：load_config() 没有处理文件不存在的情况，会直接抛 FileNotFoundError。建议加 try/except 或检查文件存在。
+
+**用户**: 修一下
+
+**助手**: 已修复。load_config() 现在会先检查文件是否存在，不存在时返回默认配置并打印 warning。
+
+**用户**: 好，也提交
+
+**助手**: 已提交：fix(config): handle missing config file gracefully

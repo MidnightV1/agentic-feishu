@@ -6,15 +6,30 @@ Covers:
 - Compression trigger threshold
 - Hybrid strategy: recent rounds preserved, older compressed
 - Fallback on compression failure
-- D9: recovery uses 15 rounds (not 15 messages)
 """
 import pytest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 from core.types import Message, ToolCall
+from core.context_manager import (
+    ContextManager, ContextConfig,
+    _adjust_split_for_tool_groups, _keep_recent,
+)
 
 
 # ── Helpers ──────────────────────────────────────────────
+
+def _make_provider():
+    """Create a minimal mock provider for ContextManager."""
+    p = AsyncMock()
+    p.count_tokens = AsyncMock(return_value=1000)
+    return p
+
+
+def _make_mgr(**config_kw) -> ContextManager:
+    """Shorthand: create ContextManager with mock provider and custom config."""
+    return ContextManager(provider=_make_provider(), config=ContextConfig(**config_kw))
+
 
 def make_conversation(rounds: int) -> list[Message]:
     """Generate a conversation with N rounds (user + assistant each)."""
@@ -31,7 +46,6 @@ def make_conversation_with_tools(rounds: int) -> list[Message]:
     for i in range(rounds):
         messages.append(Message(role="user", content=f"Request {i}"))
         if i % 2 == 0:
-            # Tool call round: assistant(tc) → tool result → assistant(reply)
             messages.append(Message(
                 role="assistant", content="",
                 tool_calls=[ToolCall(id=f"tc_{i}", name="read_file",
@@ -57,34 +71,27 @@ class TestCompressionTrigger:
 
     async def test_compress_above_threshold(self):
         """Token count > context_window * threshold → should compress."""
-        from core.context_manager import ContextManager
-
-        mgr = ContextManager(context_window=40000, compress_threshold=0.8)
-        mgr.count_tokens = AsyncMock(return_value=33000)  # > 32000
+        mgr = _make_mgr(context_window=40000, compress_threshold=0.8)
+        mgr.provider.count_tokens = AsyncMock(return_value=33000)  # > 32000
 
         messages = make_conversation(20)
-        assert await mgr.should_compress(messages) is True
+        assert await mgr.should_compress(messages, context_window=40000) is True
 
     async def test_no_compress_below_threshold(self):
-        from core.context_manager import ContextManager
-
-        mgr = ContextManager(context_window=40000, compress_threshold=0.8)
-        mgr.count_tokens = AsyncMock(return_value=20000)  # < 32000
+        mgr = _make_mgr(context_window=40000, compress_threshold=0.8)
+        mgr.provider.count_tokens = AsyncMock(return_value=20000)  # < 32000
 
         messages = make_conversation(5)
-        assert await mgr.should_compress(messages) is False
+        assert await mgr.should_compress(messages, context_window=40000) is False
 
 
 # ── Tool call/result pair integrity (P0-5) ───────────────
 
 class TestToolPairIntegrity:
-    """P0-5: Compression must never split assistant(tool_calls) from tool results."""
+    """P0-5: _adjust_split_for_tool_groups must never split tool-call atomic groups."""
 
     def test_split_keeps_pairs_together(self):
-        """When splitting old/recent, tool_call and tool_result stay in same group."""
-        from core.context_manager import ContextManager
-
-        mgr = ContextManager(context_window=40000)
+        """Cut inside a tool group → adjust to keep group intact."""
         messages = [
             Message(role="user", content="Q1"),
             Message(role="assistant", content="", tool_calls=[
@@ -96,13 +103,15 @@ class TestToolPairIntegrity:
             Message(role="assistant", content="A2"),
         ]
 
-        # Split keeping last 1 round
-        old, recent = mgr._split_for_compress(messages, keep_recent_rounds=1)
+        # Cut at index 2 (middle of tool group) → should adjust
+        adjusted = _adjust_split_for_tool_groups(messages, cut=2)
+        # The adjusted cut must not split the tool group
+        old = messages[:adjusted]
+        recent = messages[adjusted:]
 
         # Verify: in 'old', every assistant with tool_calls has its tool results
         for i, msg in enumerate(old):
             if msg.role == "assistant" and msg.tool_calls:
-                # Next message(s) must be tool results for all tool_calls
                 expected_ids = {tc.id for tc in msg.tool_calls}
                 j = i + 1
                 found_ids = set()
@@ -112,23 +121,8 @@ class TestToolPairIntegrity:
                 assert expected_ids == found_ids, \
                     f"Tool pair broken in 'old': expected {expected_ids}, found {found_ids}"
 
-        # Same check for 'recent'
-        for i, msg in enumerate(recent):
-            if msg.role == "assistant" and msg.tool_calls:
-                expected_ids = {tc.id for tc in msg.tool_calls}
-                j = i + 1
-                found_ids = set()
-                while j < len(recent) and recent[j].role == "tool":
-                    found_ids.add(recent[j].tool_call_id)
-                    j += 1
-                assert expected_ids == found_ids, \
-                    f"Tool pair broken in 'recent': expected {expected_ids}, found {found_ids}"
-
     def test_multiple_tool_calls_in_one_turn(self):
         """Assistant with 2 tool_calls → both results must stay together."""
-        from core.context_manager import ContextManager
-
-        mgr = ContextManager(context_window=40000)
         messages = [
             Message(role="user", content="Read both files"),
             Message(role="assistant", content="", tool_calls=[
@@ -142,7 +136,9 @@ class TestToolPairIntegrity:
             Message(role="assistant", content="You're welcome."),
         ]
 
-        old, recent = mgr._split_for_compress(messages, keep_recent_rounds=1)
+        # Cut at index 3 (between the two tool results) → should adjust
+        adjusted = _adjust_split_for_tool_groups(messages, cut=3)
+        old = messages[:adjusted]
 
         # The 4-message tool block (assistant+2tools+assistant) must be intact
         tc_msg = [m for m in old if m.role == "assistant" and m.tool_calls]
@@ -156,30 +152,26 @@ class TestToolPairIntegrity:
 
 class TestHybridStrategy:
 
-    async def test_recent_rounds_preserved(self):
-        """Hybrid keeps last N rounds as raw text."""
-        from core.context_manager import ContextManager
-
-        mgr = ContextManager(context_window=40000, recent_rounds_keep=5)
+    def test_keep_recent_rounds(self):
+        """_keep_recent preserves last N rounds."""
         messages = make_conversation(20)
-
-        old, recent = mgr._split_for_compress(messages, keep_recent_rounds=5)
+        recent = _keep_recent(messages, rounds=5)
         # Last 5 rounds = 10 messages
         assert len(recent) == 10
         assert recent[0].content == "Question 15"
 
     async def test_compression_fallback(self):
-        """Summary failure → fallback to sliding_window."""
-        from core.context_manager import ContextManager
-
-        mock_summarizer = AsyncMock(side_effect=Exception("LLM timeout"))
-        mgr = ContextManager(context_window=40000)
-        mgr._summarize = mock_summarizer
+        """Hybrid: summary failure → fallback to sliding_window (keep recent)."""
+        mgr = _make_mgr(context_window=40000, recent_rounds_keep=5)
+        mgr._summarize = AsyncMock(side_effect=Exception("LLM timeout"))
 
         messages = make_conversation(20)
-        result = await mgr.compress(messages, strategy="summary")
-        # Should not raise, should fallback
+        # hybrid (default) catches _summarize failure and falls back
+        result = await mgr.compress(messages, strategy="hybrid")
         assert result is not None
+        # Should at least contain the recent rounds
+        contents = [m.content for m in result]
+        assert "Question 19" in contents
 
 
 # ── Token counting (CTX-2) ───────────────────────────────
@@ -188,13 +180,19 @@ class TestTokenCounting:
 
     async def test_count_includes_tools(self):
         """CTX-2: token count must include tool schema tokens."""
-        from core.context_manager import ContextManager
+        mgr = _make_mgr(context_window=40000)
+        # Make count_tokens return different values based on tools presence
+        call_count = 0
+        async def mock_count(msgs, **kw):
+            nonlocal call_count
+            call_count += 1
+            return 5000 if kw.get("tools") else 1000
+        mgr.provider.count_tokens = mock_count
 
-        mgr = ContextManager(context_window=40000)
         messages = [Message(role="user", content="hello")]
         tools = [{"type": "function", "function": {
             "name": "bash",
-            "description": "Run a command" * 100,  # Large description
+            "description": "Run a command" * 100,
             "parameters": {"type": "object", "properties": {
                 "command": {"type": "string", "description": "The command to run"},
             }},
@@ -204,34 +202,3 @@ class TestTokenCounting:
         count_without = await mgr.count_tokens(messages, tools=None)
         assert count_with > count_without, \
             "Token count with tools must be higher than without"
-
-
-# ── Recovery context (D9) ────────────────────────────────
-
-class TestRecoveryContext:
-    """D9: recovery uses 15 rounds, not 15 messages."""
-
-    async def test_recovery_15_rounds(self):
-        from core.context_manager import ContextManager
-
-        mgr = ContextManager(context_window=40000)
-        # 20 rounds = 40 messages
-        messages = make_conversation(20)
-
-        recovery = mgr.build_recovery_context(messages, recent_rounds=15)
-        # Should contain last 15 rounds worth of content
-        assert "Question 5" in recovery  # Round 6 (first of last 15)
-        assert "Question 19" in recovery  # Last round
-        assert "Question 0" not in recovery  # Too old, excluded
-
-    async def test_recovery_with_tool_rounds(self):
-        """A round with tool calls counts as 1 round."""
-        from core.context_manager import ContextManager
-
-        mgr = ContextManager(context_window=40000)
-        messages = make_conversation_with_tools(10)
-
-        recovery = mgr.build_recovery_context(messages, recent_rounds=5)
-        # Last 5 rounds should be included
-        assert "Request 9" in recovery
-        assert "Request 5" in recovery

@@ -125,6 +125,43 @@ def _to_rfc3339(s: str) -> str:
     return s
 
 
+_REPLY_MAX_CHARS = 400  # Target max per reply; hard API limit ~800-1000
+
+
+def _split_reply(text: str, limit: int) -> list[str]:
+    """Split text into chunks for comment reply API.
+
+    Splits on paragraph boundaries first, then sentence boundaries,
+    falling back to hard cut at limit.
+    """
+    if len(text) <= limit:
+        return [text]
+
+    chunks = []
+    remaining = text
+    while remaining:
+        if len(remaining) <= limit:
+            chunks.append(remaining)
+            break
+        # Try paragraph boundary
+        cut = remaining.rfind("\n\n", 0, limit)
+        if cut > limit // 3:
+            chunks.append(remaining[:cut].rstrip())
+            remaining = remaining[cut:].lstrip("\n")
+            continue
+        # Try sentence boundary (。.！!？?)
+        for sep in ("。", ".\n", ". ", "！", "？", "!\n", "?\n"):
+            cut = remaining.rfind(sep, 0, limit)
+            if cut > limit // 3:
+                cut += len(sep)
+                break
+        else:
+            cut = limit
+        chunks.append(remaining[:cut].rstrip())
+        remaining = remaining[cut:].lstrip()
+    return [c for c in chunks if c]
+
+
 def _build_descendant_payload(items: list[dict]) -> tuple[list[str], list[dict]]:
     """Build Feishu descendant API payload from flat list items with depth.
 
@@ -652,27 +689,39 @@ class FeishuAPI:
         return comments
 
     async def reply_comment(self, document_id: str, comment_id: str, content: str) -> dict:
-        """Reply to a comment on a document."""
-        # Feishu API requires rich text structure, not plain string
-        reply_body = {
-            "content": {
-                "elements": [
-                    {
-                        "type": "text_run",
-                        "text_run": {"content": content},
-                    }
-                ]
+        """Reply to a comment on a document.
+
+        Long replies are split into multiple sequential replies to avoid
+        API error 1069302 (content too long, hard limit ~800-1000 chars).
+        """
+        chunks = _split_reply(content, _REPLY_MAX_CHARS)
+        if len(chunks) > 1:
+            log.info("Splitting reply into %d parts (%d chars) | doc=%s",
+                     len(chunks), len(content), document_id)
+
+        last_reply = {}
+        for chunk in chunks:
+            reply_body = {
+                "content": {
+                    "elements": [
+                        {
+                            "type": "text_run",
+                            "text_run": {"content": chunk},
+                        }
+                    ]
+                }
             }
-        }
-        data = await self._raw_request(
-            "POST",
-            f"/open-apis/drive/v1/files/{document_id}/comments/{comment_id}/replies",
-            body=reply_body,
-            params={"file_type": "docx"},
-        )
-        if data.get("code") != 0:
-            return {"error": f"{data.get('code')}: {data.get('msg')}"}
-        return {"ok": True, "reply": data.get("data", {}).get("reply", {})}
+            data = await self._raw_request(
+                "POST",
+                f"/open-apis/drive/v1/files/{document_id}/comments/{comment_id}/replies",
+                body=reply_body,
+                params={"file_type": "docx"},
+            )
+            if data.get("code") != 0:
+                return {"error": f"{data.get('code')}: {data.get('msg')}"}
+            last_reply = data.get("data", {}).get("reply", {})
+
+        return {"ok": True, "reply": last_reply, "parts": len(chunks)}
 
     async def update_document(self, document_id: str, content: str) -> dict:
         """Replace all document content (keeps title).

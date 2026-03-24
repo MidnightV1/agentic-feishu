@@ -286,6 +286,7 @@ class FeishuAPI:
             return {"ok": True, "blocks_added": 0}
 
         total = 0
+        created_block_ids: list[str] = []  # track for rollback
         regular_batch: list[dict] = []
         BATCH_SIZE = 50
 
@@ -293,65 +294,95 @@ class FeishuAPI:
             nonlocal total
             if not regular_batch:
                 return
+            sent = 0
             for i in range(0, len(regular_batch), BATCH_SIZE):
                 chunk = regular_batch[i:i + BATCH_SIZE]
-                resp = await self._raw_request(
-                    "POST",
-                    f"/open-apis/docx/v1/documents/{document_id}/blocks/{document_id}/children",
-                    body={"children": chunk, "index": -1},
-                    params={"document_revision_id": "-1"},
-                )
+                try:
+                    resp = await self._raw_request(
+                        "POST",
+                        f"/open-apis/docx/v1/documents/{document_id}/blocks/{document_id}/children",
+                        body={"children": chunk, "index": -1},
+                        params={"document_revision_id": "-1"},
+                    )
+                except Exception as e:
+                    log.error("Flush %d blocks failed (HTTP): %s | doc=%s",
+                              len(chunk), e, document_id)
+                    del regular_batch[:sent]
+                    raise
                 if resp.get("code") == 0:
+                    for child in resp.get("data", {}).get("children", []):
+                        bid = child.get("block_id")
+                        if bid:
+                            created_block_ids.append(bid)
                     total += len(chunk)
                 else:
                     log.error("Flush %d blocks failed: %s | doc=%s",
                               len(chunk), resp.get("msg"), document_id)
+                sent += len(chunk)
             regular_batch.clear()
 
-        for block in all_blocks:
-            if "_table" in block:
-                await _flush_regular()
-                rows = block["_table"]
+        try:
+            for block in all_blocks:
+                if "_table" in block:
+                    await _flush_regular()
+                    rows = block["_table"]
 
-                # Truncate columns exceeding API limit
-                col_count = max(len(r) for r in rows) if rows else 0
-                if col_count > TABLE_MAX_COLS:
-                    rows = [r[:TABLE_MAX_COLS] for r in rows]
+                    # Truncate columns exceeding API limit
+                    col_count = max(len(r) for r in rows) if rows else 0
+                    if col_count > TABLE_MAX_COLS:
+                        rows = [r[:TABLE_MAX_COLS] for r in rows]
 
-                chunks = split_table_rows(rows)
-                for chunk in chunks:
-                    table_bid = await self._create_table_in_doc(document_id, chunk)
-                    if table_bid:
-                        total += 1
+                    chunks = split_table_rows(rows)
+                    for chunk in chunks:
+                        table_bid = await self._create_table_in_doc(document_id, chunk)
+                        if table_bid:
+                            created_block_ids.append(table_bid)
+                            total += 1
+                        else:
+                            # Degrade: table failed → write as plain-text pipe rows
+                            log.warning("Table degraded to text: %d rows | doc=%s",
+                                        len(chunk), document_id)
+                            for row in chunk:
+                                line = "| " + " | ".join(row) + " |"
+                                regular_batch.append({
+                                    "block_type": 2,
+                                    "text": {"elements": [{"text_run": {"content": line}}]},
+                                })
+                elif "_nested_list" in block:
+                    await _flush_regular()
+                    count = await self._create_nested_list(document_id, block["_nested_list"])
+                    if count:
+                        total += count
                     else:
-                        # Degrade: table failed → write as plain-text pipe rows
-                        log.warning("Table degraded to text: %d rows | doc=%s",
-                                    len(chunk), document_id)
-                        for row in chunk:
-                            line = "| " + " | ".join(row) + " |"
+                        # Degrade: descendant API failed → flat blocks
+                        log.warning("Nested list degraded to flat | doc=%s", document_id)
+                        for item in block["_nested_list"]:
+                            bt = 12 if item["type"] == "bullet" else 13
+                            key = "bullet" if item["type"] == "bullet" else "ordered"
                             regular_batch.append({
-                                "block_type": 2,
-                                "text": {"elements": [{"text_run": {"content": line}}]},
+                                "block_type": bt,
+                                key: {"elements": item["elements"]},
                             })
-            elif "_nested_list" in block:
-                await _flush_regular()
-                count = await self._create_nested_list(document_id, block["_nested_list"])
-                if count:
-                    total += count
                 else:
-                    # Degrade: descendant API failed → flat blocks
-                    log.warning("Nested list degraded to flat | doc=%s", document_id)
-                    for item in block["_nested_list"]:
-                        bt = 12 if item["type"] == "bullet" else 13
-                        key = "bullet" if item["type"] == "bullet" else "ordered"
-                        regular_batch.append({
-                            "block_type": bt,
-                            key: {"elements": item["elements"]},
-                        })
-            else:
-                regular_batch.append(block)
+                    regular_batch.append(block)
 
-        await _flush_regular()
+            await _flush_regular()
+        except Exception:
+            # Rollback: best-effort delete blocks created in this call
+            if created_block_ids:
+                log.error("Append failed mid-way, rolling back %d blocks | doc=%s",
+                          len(created_block_ids), document_id)
+                for bid in reversed(created_block_ids):
+                    try:
+                        await self._raw_request(
+                            "DELETE",
+                            f"/open-apis/docx/v1/documents/{document_id}/blocks/{bid}",
+                            params={"document_revision_id": "-1"},
+                        )
+                    except Exception as e:
+                        log.debug("Rollback delete %s failed: %s", bid, e)
+            raise
+
         return {"ok": True, "blocks_added": total}
 
     async def _create_nested_list(self, doc_id: str, items: list[dict]) -> int:

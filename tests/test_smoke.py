@@ -40,12 +40,12 @@ class MockProvider:
             # First turn: request a tool call
             tc = ToolCall(id="tc_1", name="echo", arguments={"text": "hello from tool"})
             msg = Message(role="assistant", content="Let me call echo.", tool_calls=[tc])
-            msg._usage = Usage(input_tokens=10, output_tokens=5)
+            self._last_usage = Usage(input_tokens=10, output_tokens=5)
             return msg
         else:
             # Second turn: final text response
             msg = Message(role="assistant", content="Tool returned: hello from tool")
-            msg._usage = Usage(input_tokens=15, output_tokens=8)
+            self._last_usage = Usage(input_tokens=15, output_tokens=8)
             return msg
 
     async def _stream_response(self):

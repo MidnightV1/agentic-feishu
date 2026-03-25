@@ -22,7 +22,8 @@ from typing import Any
 
 from core.agent_loop import AgentLoop
 from core.context_manager import ContextManager
-from core.types import Callbacks, Message, RunConfig
+from core.types import Callbacks, Message, RunConfig, ToolCall
+from infra.jsonl_store import JSONLStore
 from infra.session import SessionStore, SessionRecord
 from infra.user_bot_relation import UserBotRelation
 from infra.user_profile import UserProfileStore
@@ -228,6 +229,7 @@ class FeishuAdapter:
         context_manager: ContextManager | None = None,
         provider_factory: Any = None,
         scheduler: Any = None,
+        jsonl_store: JSONLStore | None = None,
     ):
         self.app_id = app_id
         self.app_secret = app_secret
@@ -236,6 +238,7 @@ class FeishuAdapter:
         self._dispatcher = dispatcher
         self._usage = usage_tracker
         self._sessions = session_store
+        self._jsonl = jsonl_store
         self._run_config = run_config
         self._bot_name = bot_name
         self._assembler = context_assembler
@@ -844,7 +847,10 @@ class FeishuAdapter:
             )
 
             # Save raw user message (unwrapped — tags are transport-layer, not storage)
-            await self._sessions.add_message(session_key, "user", text)
+            await self._sessions.add_message(
+                session_key, "user", text, msg_type="user"
+            )
+            self._write_jsonl(session_key, "user", text, msg_type="user")
 
             # ── Streaming + pulse state ──
             stream_buf: list[str] = []
@@ -970,12 +976,20 @@ class FeishuAdapter:
             elif thinking_id:
                 await self._dispatcher.update_card(thinking_id, "(处理完成)")
 
-            # Save assistant message (parsed reply, not raw — matches what user sees)
-            if reply_text:
-                await self._sessions.add_message(session_key, "assistant", reply_text)
+            # Persist full message chain (all tool calls + results + final reply)
+            if result.messages:
+                await self._persist_messages(session_key, result.messages)
+            elif reply_text:
+                # Fallback: no messages in result, save reply directly
+                await self._sessions.add_message(
+                    session_key, "assistant", reply_text, msg_type="assistant"
+                )
+                self._write_jsonl(
+                    session_key, "assistant", reply_text, msg_type="assistant"
+                )
 
             # Update session stats
-            session.message_count += 2  # user + assistant
+            session.message_count += 1 + len(result.messages)  # user + chain
             session.total_cost_usd += result.cost_usd
             await self._sessions.save(session)
 
@@ -1092,6 +1106,87 @@ class FeishuAdapter:
 
         if result:
             await self._buffer_message(key, result, chat_id, chat_type, sender_id, message_id)
+
+    # ── Message persistence: SQLite + JSONL dual-write ─────────────
+
+    async def _persist_messages(
+        self,
+        session_key: str,
+        messages: list,
+        status: str = "done",
+    ) -> None:
+        """Persist a list of Message objects (from RunResult) to SQLite + JSONL.
+
+        Handles all message types:
+        - assistant with tool_calls → msg_type='tool_call'
+        - assistant without tool_calls → msg_type='assistant'
+        - tool → msg_type='tool_result'
+        - user → msg_type='user'
+        - system → msg_type='system'
+        """
+        for msg in messages:
+            # Determine msg_type
+            if msg.role == "assistant" and msg.tool_calls:
+                msg_type = "tool_call"
+            elif msg.role == "assistant":
+                msg_type = "assistant"
+            elif msg.role == "tool":
+                msg_type = "tool_result"
+            elif msg.role == "system":
+                msg_type = "system"
+            else:
+                msg_type = msg.role  # user, etc.
+
+            # Extract content as string
+            content = msg.text if hasattr(msg, "text") else str(msg.content or "")
+
+            # Serialize tool_calls
+            tc_list = None
+            if msg.tool_calls:
+                tc_list = [
+                    {"id": tc.id, "name": tc.name, "arguments": tc.arguments}
+                    for tc in msg.tool_calls
+                ]
+
+            # Write to SQLite
+            await self._sessions.add_message(
+                session_key,
+                msg.role,
+                content,
+                msg_type=msg_type,
+                tool_calls=tc_list,
+                tool_call_id=getattr(msg, "tool_call_id", None),
+                name=getattr(msg, "name", None),
+                status=status,
+            )
+
+            # Write to JSONL (dual-write)
+            if self._jsonl:
+                self._jsonl.append(
+                    session_key,
+                    msg.role,
+                    content,
+                    msg_type=msg_type,
+                    tool_calls=tc_list,
+                    tool_call_id=getattr(msg, "tool_call_id", None),
+                    tool_name=getattr(msg, "name", None),
+                    status=status,
+                )
+
+    def _write_jsonl(
+        self,
+        session_key: str,
+        role: str,
+        content: str,
+        *,
+        msg_type: str = "user",
+        status: str = "done",
+    ) -> None:
+        """Convenience: write a single record to JSONL only."""
+        if self._jsonl:
+            self._jsonl.append(
+                session_key, role, content, msg_type=msg_type, status=status
+            )
 
     # ── Empty-content fallback: summarize tool work ─────────────────
 

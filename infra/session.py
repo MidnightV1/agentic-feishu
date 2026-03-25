@@ -30,11 +30,12 @@ CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_key TEXT NOT NULL,
     role TEXT NOT NULL,
+    msg_type TEXT NOT NULL DEFAULT 'user',
     content TEXT NOT NULL DEFAULT '',
     tool_calls_json TEXT NOT NULL DEFAULT '[]',
     tool_call_id TEXT DEFAULT NULL,
     tool_name TEXT DEFAULT NULL,
-    status TEXT NOT NULL DEFAULT 'received',
+    status TEXT NOT NULL DEFAULT 'done',
     created_at REAL NOT NULL,
     FOREIGN KEY (session_key) REFERENCES sessions(session_key)
 );
@@ -122,10 +123,23 @@ class SessionStore:
             msg_cols = [row[1] for row in await cursor.fetchall()]
             if "status" not in msg_cols and "id" in msg_cols:
                 await self._db.execute(
-                    "ALTER TABLE messages ADD COLUMN status TEXT NOT NULL DEFAULT 'received'"
+                    "ALTER TABLE messages ADD COLUMN status TEXT NOT NULL DEFAULT 'done'"
                 )
                 await self._db.commit()
                 log.info("Migrated messages table: added status column")
+        except Exception:
+            pass  # table doesn't exist yet
+
+        # Migration: add msg_type column
+        try:
+            cursor = await self._db.execute("PRAGMA table_info(messages)")
+            msg_cols2 = [row[1] for row in await cursor.fetchall()]
+            if "msg_type" not in msg_cols2 and "id" in msg_cols2:
+                await self._db.execute(
+                    "ALTER TABLE messages ADD COLUMN msg_type TEXT NOT NULL DEFAULT 'user'"
+                )
+                await self._db.commit()
+                log.info("Migrated messages table: added msg_type column")
         except Exception:
             pass  # table doesn't exist yet
 
@@ -230,31 +244,36 @@ class SessionStore:
         session_key: str,
         role: str,
         content: str,
+        *,
+        msg_type: str = "user",
         tool_calls: list[dict] | None = None,
         tool_call_id: str | None = None,
         name: str | None = None,
-        status: str = "received",
+        status: str = "done",
     ) -> int:
         """Append a message to a session. Returns the message id.
 
         Args:
             session_key: Session identifier.
-            role: Message role (user, assistant, tool).
+            role: Message role (user, assistant, tool, system).
             content: Message content.
+            msg_type: Semantic type — user, assistant, tool_call, tool_result, system.
             tool_calls: List of tool call dicts (for assistant messages).
             tool_call_id: Tool call ID this message responds to (for tool messages).
             name: Tool name (for tool messages).
-            status: Message status (received, processing, done, failed).
+            status: Message status (done, cancelled, error).
         """
         async with self.db.execute(
             """
             INSERT INTO messages
-                (session_key, role, content, tool_calls_json, tool_call_id, tool_name, status, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (session_key, role, msg_type, content, tool_calls_json,
+                 tool_call_id, tool_name, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 session_key,
                 role,
+                msg_type,
                 content,
                 json.dumps(tool_calls or [], ensure_ascii=False),
                 tool_call_id,
@@ -293,7 +312,8 @@ class SessionStore:
         """Get messages for a session, ordered by creation time."""
         async with self.db.execute(
             """
-            SELECT role, content, tool_calls_json, tool_call_id, tool_name, created_at
+            SELECT role, msg_type, content, tool_calls_json,
+                   tool_call_id, tool_name, status, created_at
             FROM messages
             WHERE session_key = ?
             ORDER BY created_at ASC
@@ -306,8 +326,10 @@ class SessionStore:
             for row in rows:
                 msg: dict[str, Any] = {
                     "role": row["role"],
+                    "msg_type": row["msg_type"],
                     "content": row["content"],
                     "tool_calls": json.loads(row["tool_calls_json"]),
+                    "status": row["status"],
                     "created_at": row["created_at"],
                 }
                 if row["tool_call_id"] is not None:

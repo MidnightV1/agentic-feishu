@@ -322,6 +322,7 @@ async def main() -> None:
             context_manager=context_mgr,
             provider_factory=_provider_factory,
             scheduler=scheduler,
+            jsonl_store=jsonl_store,
         )
         adapter.set_media_handler(bot_media, bot_feishu_api)
         await adapter.start()

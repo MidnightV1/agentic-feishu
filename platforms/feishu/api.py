@@ -559,13 +559,11 @@ class FeishuAPI:
         return len(top_level_ids)
 
     async def _create_quote_container(self, doc_id: str, text_blocks: list[dict]) -> str | None:
-        """Create a callout container (block_type 19) for blockquotes.
+        """Create a callout block (block_type 19) for markdown blockquotes.
 
-        Uses callout instead of quote_container because quote_container (31) is
-        not creatable via API. Callout (19) with neutral colors approximates
-        the blockquote visual.
+        quote_container (block_type 31) is not API-creatable, so we use callout
+        with neutral grey styling as the closest visual approximation.
 
-        Uses the descendant API to create the container and its children atomically.
         Returns the container block_id, or None on failure.
         """
         if not text_blocks:

@@ -182,32 +182,44 @@ class TestLists:
 class TestBlockquotes:
     def test_basic(self):
         blocks = text_to_blocks("> 引用内容")
-        assert blocks[0]["block_type"] == 2
-        elements = blocks[0]["text"]["elements"]
-        # First element is ▎ prefix, content follows
-        assert elements[0]["text_run"]["content"] == "▎ "
-        all_text = "".join(e["text_run"]["content"] for e in elements)
+        assert "_quote" in blocks[0]
+        quote_children = blocks[0]["_quote"]
+        assert len(quote_children) == 1
+        assert quote_children[0]["block_type"] == 2
+        all_text = "".join(
+            e["text_run"]["content"]
+            for e in quote_children[0]["text"]["elements"]
+        )
         assert "引用内容" in all_text
 
     def test_empty_quote(self):
         blocks = text_to_blocks(">")
-        elements = blocks[0]["text"]["elements"]
-        assert elements[0]["text_run"]["content"] == "▎ "
+        assert "_quote" in blocks[0]
+        quote_children = blocks[0]["_quote"]
+        assert quote_children[0]["block_type"] == 2
 
-    def test_consecutive_quotes_merged(self):
-        """Consecutive > lines should merge into a single block."""
+    def test_consecutive_quotes_grouped(self):
+        """Consecutive > lines should group into a single _quote container."""
         blocks = text_to_blocks("> 第一行\n> 第二行\n> 第三行")
         assert len(blocks) == 1
-        assert blocks[0]["block_type"] == 2
-        all_text = "".join(e["text_run"]["content"] for e in blocks[0]["text"]["elements"])
-        assert "第一行" in all_text
-        assert "第二行" in all_text
-        assert "第三行" in all_text
+        assert "_quote" in blocks[0]
+        assert len(blocks[0]["_quote"]) == 3
+        texts = [
+            "".join(e["text_run"]["content"] for e in child["text"]["elements"])
+            for child in blocks[0]["_quote"]
+        ]
+        assert "第一行" in texts[0]
+        assert "第二行" in texts[1]
+        assert "第三行" in texts[2]
 
     def test_html_entities_decoded(self):
         """HTML entities should be decoded."""
         blocks = text_to_blocks("> a &#60; b &#62; c")
-        all_text = "".join(e["text_run"]["content"] for e in blocks[0]["text"]["elements"])
+        assert "_quote" in blocks[0]
+        all_text = "".join(
+            e["text_run"]["content"]
+            for e in blocks[0]["_quote"][0]["text"]["elements"]
+        )
         assert "a < b > c" in all_text
 
 
@@ -333,14 +345,18 @@ class TestMixedContent:
             "普通文本\n"
         )
         blocks = text_to_blocks(md)
-        types = [b.get("block_type") or ("_table" if "_table" in b else "?") for b in blocks]
+        def block_type(b):
+            if "_table" in b: return "_table"
+            if "_quote" in b: return "_quote"
+            return b.get("block_type")
+        types = [block_type(b) for b in blocks]
         assert types[0] == 3   # heading
         assert types[1] == 22  # divider
         assert types[2] == 14  # code
         assert types[3] == "_table"
         assert types[4] == 12  # bullet
         assert types[5] == 13  # ordered
-        assert types[6] == 2   # blockquote
+        assert types[6] == "_quote"  # blockquote → quote container
         assert types[7] == 2   # plain text
 
     def test_real_technical_doc(self):
@@ -554,12 +570,13 @@ class TestCardHeaderStripping:
 
 
 class TestBlockquoteInline:
+    def _get_quote_elements(self, md: str, child_idx: int = 0) -> list[dict]:
+        blocks = text_to_blocks(md)
+        assert "_quote" in blocks[0]
+        return blocks[0]["_quote"][child_idx]["text"]["elements"]
+
     def test_quote_with_bold(self):
-        blocks = text_to_blocks("> **重点**内容")
-        elements = blocks[0]["text"]["elements"]
-        # First element is ▎ prefix
-        assert elements[0]["text_run"]["content"] == "▎ "
-        # Should contain bold element
+        elements = self._get_quote_elements("> **重点**内容")
         bold = next(
             (e for e in elements if e["text_run"].get("text_element_style", {}).get("bold")),
             None,
@@ -568,8 +585,7 @@ class TestBlockquoteInline:
         assert bold["text_run"]["content"] == "重点"
 
     def test_quote_with_code(self):
-        blocks = text_to_blocks("> 使用 `cmd` 命令")
-        elements = blocks[0]["text"]["elements"]
+        elements = self._get_quote_elements("> 使用 `cmd` 命令")
         code = next(
             (e for e in elements if e["text_run"].get("text_element_style", {}).get("inline_code")),
             None,
@@ -577,8 +593,7 @@ class TestBlockquoteInline:
         assert code is not None
 
     def test_quote_with_link(self):
-        blocks = text_to_blocks("> 参见 [文档](https://example.com)")
-        elements = blocks[0]["text"]["elements"]
+        elements = self._get_quote_elements("> 参见 [文档](https://example.com)")
         link = next(
             (e for e in elements if e["text_run"].get("text_element_style", {}).get("link")),
             None,
@@ -587,5 +602,5 @@ class TestBlockquoteInline:
 
     def test_empty_quote_unchanged(self):
         blocks = text_to_blocks(">")
-        elements = blocks[0]["text"]["elements"]
-        assert elements[0]["text_run"]["content"] == "▎ "
+        assert "_quote" in blocks[0]
+        assert blocks[0]["_quote"][0]["block_type"] == 2

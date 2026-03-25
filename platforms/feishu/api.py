@@ -469,6 +469,22 @@ class FeishuAPI:
                                     "block_type": 2,
                                     "text": {"elements": [{"text_run": {"content": line}}]},
                                 })
+                elif "_quote" in block:
+                    await _flush_regular()
+                    quote_bid = await self._create_quote_container(document_id, block["_quote"])
+                    if quote_bid:
+                        created_block_ids.append(quote_bid)
+                        total += 1
+                    else:
+                        # Degrade: quote container failed → plain text with ▎ prefix
+                        log.warning("Quote container degraded to text | doc=%s", document_id)
+                        for qblock in block["_quote"]:
+                            elements = qblock.get("text", {}).get("elements", [])
+                            degraded = [{"text_run": {"content": "▎"}}] + elements
+                            regular_batch.append({
+                                "block_type": 2,
+                                "text": {"elements": degraded},
+                            })
                 elif "_nested_list" in block:
                     await _flush_regular()
                     count = await self._create_nested_list(document_id, block["_nested_list"])
@@ -541,6 +557,53 @@ class FeishuAPI:
             return 0
 
         return len(top_level_ids)
+
+    async def _create_quote_container(self, doc_id: str, text_blocks: list[dict]) -> str | None:
+        """Create a native quote container (block_type 27) with text children.
+
+        Uses the descendant API to create the container and its children atomically.
+        Returns the container block_id, or None on failure.
+        """
+        if not text_blocks:
+            return None
+
+        container_id = f"tmp_{uuid.uuid4().hex[:8]}"
+        descendants: list[dict] = [{
+            "block_id": container_id,
+            "block_type": 27,
+            "children": [],
+        }]
+
+        for block in text_blocks:
+            child_id = f"tmp_{uuid.uuid4().hex[:8]}"
+            descendants[0]["children"].append(child_id)
+            descendants.append({
+                "block_id": child_id,
+                **block,
+            })
+
+        try:
+            resp = await self._raw_request(
+                "POST",
+                f"/open-apis/docx/v1/documents/{doc_id}/blocks/{doc_id}/descendant",
+                body={
+                    "children_id": [container_id],
+                    "index": -1,
+                    "descendants": descendants,
+                },
+                params={"document_revision_id": "-1"},
+            )
+        except Exception as e:
+            log.error("Quote descendant API failed (HTTP): %s | doc=%s", e, doc_id)
+            return None
+
+        if resp.get("code") != 0:
+            log.error("Quote descendant API failed (code %s): %s | doc=%s",
+                      resp.get("code"), resp.get("msg"), doc_id)
+            return None
+
+        children = resp.get("data", {}).get("children", [])
+        return children[0] if children else container_id
 
     async def _create_table_in_doc(self, doc_id: str, rows: list[list[str]]) -> str | None:
         """Create a native table in a Feishu document.

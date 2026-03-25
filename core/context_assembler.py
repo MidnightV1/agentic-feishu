@@ -31,10 +31,10 @@ class ContextAssembler:
         [105] Platform rules (Feishu card syntax, XML protocol)
         [100] Org Soul
         [ 98] Org Cognition
+        [ 97] Tools + Skills
         [ 95] Bot Soul
         [ 90] Bot Instructions
         [ 80] User*Bot Persona
-        [ 75] Tools + Skills
         [ 70] Bot Shared Knowledge
         [ 68] User*Bot Corrections
         [ 65] Active Skill Context (injected on trigger)
@@ -107,6 +107,15 @@ class ContextAssembler:
                 type="org_cognition", content=org_cog, priority=98,
             ))
 
+        # -- Tools + Skills (97) --
+        tool_text = self._tool_guidelines
+        if self._skill_descriptions:
+            tool_text = f"{tool_text}\n\n{self._skill_descriptions}" if tool_text else self._skill_descriptions
+        if tool_text:
+            components.append(ContextComponent(
+                type="tool_guidelines", content=tool_text, priority=97,
+            ))
+
         # -- Bot Soul (95) + Instructions (90) --
         bot_soul = self._bot.soul
         if bot_soul:
@@ -129,15 +138,6 @@ class ContextAssembler:
         if persona:
             components.append(ContextComponent(
                 type="persona", content=persona, priority=80,
-            ))
-
-        # -- Tools + Skills (75) --
-        tool_text = self._tool_guidelines
-        if self._skill_descriptions:
-            tool_text = f"{tool_text}\n\n{self._skill_descriptions}" if tool_text else self._skill_descriptions
-        if tool_text:
-            components.append(ContextComponent(
-                type="tool_guidelines", content=tool_text, priority=75,
             ))
 
         # -- Bot Shared Knowledge (70) --

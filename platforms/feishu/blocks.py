@@ -8,7 +8,7 @@ Converts markdown text into Feishu block API format:
 - Code blocks → code blocks (block_type 14)
 - Tables → _table markers (handled by append logic)
 - Dividers → divider blocks (block_type 22)
-- Blockquotes → text blocks with ▎ prefix
+- Blockquotes → native quote container (block_type 27) via descendant API
 """
 
 from __future__ import annotations
@@ -331,24 +331,24 @@ def text_to_blocks(markdown: str) -> list[dict[str, Any]]:
             i += 1
             continue
 
-        # Blockquote: collect consecutive > lines into a single ▎-prefixed block
+        # Blockquote: consecutive > lines → native quote container
         qm = _QUOTE_RE.match(line)
         if qm:
-            quote_lines: list[str] = []
+            quote_children: list[dict] = []
             while i < len(lines):
                 qm2 = _QUOTE_RE.match(lines[i].rstrip())
                 if not qm2:
                     break
-                quote_lines.append(qm2.group(1) or "")
+                content = qm2.group(1) or ""
+                elements = _parse_inline(content) if content else [
+                    {"text_run": {"content": ""}}
+                ]
+                quote_children.append({
+                    "block_type": 2,
+                    "text": {"elements": elements},
+                })
                 i += 1
-            merged = "\n".join(quote_lines)
-            elements = [{"text_run": {"content": "▎ "}}]
-            if merged:
-                elements.extend(_parse_inline(merged))
-            blocks.append({
-                "block_type": 2,
-                "text": {"elements": elements},
-            })
+            blocks.append({"_quote": quote_children})
             continue
 
         # Unordered list: - item or * item (with nested list support)

@@ -75,21 +75,20 @@
     ]
   },
   {
-    "block_type": 2,
-    "text": {
-      "elements": [
-        {
-          "text_run": {
-            "content": "▎"
-          }
-        },
-        {
-          "text_run": {
-            "content": "Quote"
-          }
+    "_quote": [
+      {
+        "block_type": 2,
+        "text": {
+          "elements": [
+            {
+              "text_run": {
+                "content": "Quote"
+              }
+            }
+          ]
         }
-      ]
-    }
+      }
+    ]
   },
   {
     "block_type": 22,

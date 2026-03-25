@@ -559,7 +559,11 @@ class FeishuAPI:
         return len(top_level_ids)
 
     async def _create_quote_container(self, doc_id: str, text_blocks: list[dict]) -> str | None:
-        """Create a native quote container (block_type 27) with text children.
+        """Create a callout container (block_type 19) for blockquotes.
+
+        Uses callout instead of quote_container because quote_container (31) is
+        not creatable via API. Callout (19) with neutral colors approximates
+        the blockquote visual.
 
         Uses the descendant API to create the container and its children atomically.
         Returns the container block_id, or None on failure.
@@ -570,7 +574,8 @@ class FeishuAPI:
         container_id = f"tmp_{uuid.uuid4().hex[:8]}"
         descendants: list[dict] = [{
             "block_id": container_id,
-            "block_type": 27,
+            "block_type": 19,
+            "callout": {"background_color": 15, "border_color": 6},
             "children": [],
         }]
 

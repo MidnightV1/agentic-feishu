@@ -8,7 +8,7 @@ Converts markdown text into Feishu block API format:
 - Code blocks → code blocks (block_type 14)
 - Tables → _table markers (handled by append logic)
 - Dividers → divider blocks (block_type 22)
-- Blockquotes → native quote container (block_type 27) via descendant API
+- Blockquotes → callout container (block_type 19) via descendant API
 """
 
 from __future__ import annotations
